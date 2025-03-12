@@ -444,7 +444,7 @@ wbTimerNode_t wbTimer_start(wbTimerKind_t kind, const char *file,
 }
 
 wbTimerNode_t wbTimer_start(wbTimerKind_t kind, string msg,
-                            const char *file, const char *fun, int line) {
+                            const char *file, const char *fun, int line) { // all in starter.cu call here
   wbTimerNode_t node = wbTimer_start(kind, file, fun, line);
   wbTimerNode_setMessage(node, wbString_duplicate(msg));
   return node;

@@ -9,7 +9,7 @@ typedef bool wbBool;
 typedef float wbReal_t;
 typedef char wbChar_t;
 
-typedef struct st_wbTimerNode_t *wbTimerNode_t;
+typedef struct st_wbTimerNode_t *wbTimerNode_t; // wbTimerNode_t is an alias for st_wbTimerNode_t, defined in wbTimer.h
 typedef struct st_wbTimer_t *wbTimer_t;
 typedef struct st_wbLogEntry_t *wbLogEntry_t;
 typedef struct st_wbLogger_t *wbLogger_t;

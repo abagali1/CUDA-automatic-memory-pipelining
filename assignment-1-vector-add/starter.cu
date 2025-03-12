@@ -29,7 +29,8 @@ int main(int argc, char **argv) {
 
   args = wbArg_read(argc, argv);
 
-  wbTime_start(Generic, "Importing data and creating memory on host");
+  wbTimerNode_t data_import = wbTime_start(Generic, "Importing data and creating memory on host");
+  printf("START TIME: %d\n", data_import->startTime);
   hostInput1 =
       (float *)wbImport(wbArg_getInputFile(args, 0), &inputLength);
   hostInput2 =
