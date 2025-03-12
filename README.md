@@ -5,7 +5,7 @@ EECS 570 Final Project
 * ssh into greatlakes
 * clone folder and cd into folder
 
-```
+```bash
 module load cuda/12.6
 mkdir build && cd build
 cmake ..
@@ -19,7 +19,7 @@ This will create the `sgemm` executable
 
 * from project base directory
 
-```
+```bash
 sbatch submit.sh
 ```
 
@@ -27,7 +27,7 @@ sbatch submit.sh
 
 Two lines:
 
-```
+```bash
 ./build/sgemm <number>
 ./gen_benchmark_results.sh
 ```
@@ -61,7 +61,7 @@ View your running jobs
 squeue --user=<uniqname>
 ```
 
-View running jobs on `spgpu` partition
+View running jobs on `spgpu` partition (`spgpu` is the Slurm partition with A100 gpus)
 ```bash
 squeue --partition=spgpu
 ```
