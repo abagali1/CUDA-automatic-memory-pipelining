@@ -23,6 +23,8 @@ This will create the `sgemm` executable
 sbatch submit.sh
 ```
 
+This command will output a job id number and create a file in the project base directory called `slurm-<job_id>.out`. The `.out` file will contain all output from the `submit.sh` script.
+
 ## Changing submit.sh
 
 Two lines:
