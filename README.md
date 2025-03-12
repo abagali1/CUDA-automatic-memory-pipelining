@@ -30,7 +30,7 @@ This command will output a job id number and create a file in the project base d
 Two lines:
 
 ```bash
-./build/sgemm <number>
+./build/sgemm <kernel_number>
 ./gen_benchmark_results.sh
 ```
 
