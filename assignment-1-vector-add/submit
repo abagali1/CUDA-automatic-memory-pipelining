@@ -1,0 +1,12 @@
+#!/bin/bash
+
+if [ "$#" -ne 2 ]; then
+	echo "Usage: /scratch/eecs471f24_class_root/eecs471f24_class/shared_data/submit {filename.cu} {project_num}"
+	exit 1
+fi
+
+chmod 700 $1
+cp -f $1 /scratch/eecs471f24_class_root/eecs471f24_class//all_sub/$USER/assignment-$2/$USER-assignment-$2.cu
+setfacl -m u:"joeberns":rwx /scratch/eecs471f24_class_root/eecs471f24_class/all_sub/$USER/assignment-$2/$USER-assignment-$2.cu
+setfacl -m u:"reetudas":rwx /scratch/eecs471f24_class_root/eecs471f24_class/all_sub/$USER/assignment-$2/$USER-assignment-$2.cu
+setfacl -m u:"aryanj":rwx /scratch/eecs471f24_class_root/eecs471f24_class/all_sub/$USER/assignment-$2/$USER-assignment-$2.cu
