@@ -1,3 +1,0 @@
-./starter.cu: line 2: $'\r': command not found
-./starter.cu: line 4: syntax error near unexpected token `do'
-./starter.cu: line 4: `  do {                                                                    \'
