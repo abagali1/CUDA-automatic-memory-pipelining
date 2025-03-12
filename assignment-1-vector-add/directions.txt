@@ -1,0 +1,18 @@
+Directions for Running CUDA program:
+1. Load the CUDA module. This only needs to be done once per session.
+module load cuda
+
+2. Build your file
+./build <src.cu> <out>
+example: ./build starter.cu vec_add.out
+
+3. Submit program to cluster
+sbatch run_tests <out>
+example: sbatch run_tests vec_add.out
+
+4. Check the output
+cat slurm-<job_id>.out
+
+5. If a test fails, run it individually to view output
+sbatch run_tests ⁢<out> <⁢casenum>
+example: sbatch run_tests vec_add.out 5
