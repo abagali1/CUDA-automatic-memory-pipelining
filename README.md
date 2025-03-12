@@ -43,7 +43,7 @@ for kernel in {1..4}; do
 
 Change `{1..4}` accordingly to run the benchmarks you want. MUST start at 1.
 
-After running `gen_benchmark_results.sh` through `sbatch` run `python3 plot_benchmark_results.py` to generate plot
+After running `gen_benchmark_results.sh` through `sbatch` run `python3 plot_benchmark_results.py` to generate plot (DO NOT run python script through Slurm)
 
 # Kernel Descriptions
 
