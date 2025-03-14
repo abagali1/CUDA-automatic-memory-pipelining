@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
   cudaEventCreate(&end);
 
   // cuBLAS FLOPs ceiling is reached at 8192
-  std::vector<int> SIZE = {128, 256, 512, 1024, 2048, 4096};
+  std::vector<int> SIZE = {32, 128, 256, 512, 1024, 2048, 4096};
 
   long m, n, k, max_size;
   max_size = SIZE[SIZE.size() - 1];
@@ -112,14 +112,8 @@ int main(int argc, char **argv) {
       cudaMemcpy(C, dC, sizeof(float) * m * n, cudaMemcpyDeviceToHost);
       cudaMemcpy(C_ref, dC_ref, sizeof(float) * m * n, cudaMemcpyDeviceToHost);
 
-
-      if (!verify_matrix(C_ref, C, m * n)) {
-        std::cout
-            << "Failed to pass the correctness verification against NVIDIA "
-               "cuBLAS."
-            << std::endl;
-        if (m <= 128) {
-          std::cout << " Logging faulty output into " << errLogFile << "\n";
+      if (m < 128) {
+          std::cout << " Logging dummy check output into " << errLogFile << "\n";
           std::ofstream fs;
           fs.open(errLogFile);
           fs << "A:\n";
@@ -130,7 +124,11 @@ int main(int argc, char **argv) {
           print_matrix(C, m, n, fs);
           fs << "Should:\n";
           print_matrix(C_ref, m, n, fs);
-        }
+      }
+      if (!verify_matrix(C_ref, C, m * n)) {
+        std::cout
+            << "Failed to pass the correctness verification"
+            << std::endl;
         exit(EXIT_FAILURE);
       }
     }

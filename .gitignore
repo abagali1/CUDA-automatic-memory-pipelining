@@ -15,3 +15,7 @@ simplest
 
 # benchmark results
 benchmark_results/
+
+# debug output
+matrixValidationFailure.txt
+

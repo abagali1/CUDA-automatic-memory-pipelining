@@ -6,12 +6,14 @@
 #SBATCH --account=eecs570s001w25_class
 #SBATCH --partition=spgpu
 #SBATCH --gpus-per-node=1
+#SBATCH --
 
 start_time=$(date +%s)
 module load cuda/12.6
 
 # ./build/sgemm 4
-./gen_benchmark_results.sh
+# ./gen_benchmark_results.sh
+ncu --set full -o profile_async -f ./build/simplest_kernel
 
 end_time=$(date +%s)
 runtime=$((end_time - start_time))
