@@ -17,7 +17,9 @@
         "__config": "cpp",
         "pipeline": "cpp",
         "*.tcc": "cpp",
-        "streambuf": "cpp"
+        "streambuf": "cpp",
+        "barrier": "cpp",
+        "type_traits": "cpp"
     },
     "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
 }

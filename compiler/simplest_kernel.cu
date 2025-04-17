@@ -85,15 +85,15 @@ __global__ void pipelined(float* dest, float const* src, size_t size) {
         // pipe.producer_acquire();
         size_t idx = offset + stage * stride + threadIdx.x;
         if (idx < size) {
-            asm volatile(
-              "cp.async.ca.shared.global [%0], [%1], %2, %3;\n"
-              :
-              : "r"(static_cast<std::uint32_t>(__cvta_generic_to_shared(&smem[stage][threadIdx.x]))),//  &smem[stage][threadIdx.x]), 
-                "l"(&src[idx]),
-                "n"(sizeof(float)), "n"(sizeof(float))
-              : "memory"
-          );
-            // cuda::memcpy_async(&smem[stage][threadIdx.x], &src[idx], sizeof(float), pipe);
+          //   asm volatile(
+          //     "cp.async.ca.shared.global [%0], [%1], %2, %3;\n"
+          //     :
+          //     : "r"(static_cast<std::uint32_t>(__cvta_generic_to_shared(&smem[stage][threadIdx.x]))),//  &smem[stage][threadIdx.x]), 
+          //       "l"(&src[idx]),
+          //       "n"(sizeof(float)), "n"(sizeof(float))
+          //     : "memory"
+          // );
+            cuda::memcpy_async(&smem[stage][threadIdx.x], &src[idx], sizeof(float), pipe);
         }
         pipe.producer_commit();
     }
