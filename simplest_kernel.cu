@@ -3,6 +3,8 @@
 #include <vector>
 #include <sys/time.h>
 
+#include <cuda/barrier>
+#include <cuda/pipeline>
 #include <cooperative_groups.h>
 #include <cooperative_groups/memcpy_async.h>
 
@@ -14,15 +16,17 @@ void cudaCheck_f(cudaError_t error, const char *file, int line) {
   }
 };
 
+bool floateq(float a, float b, float eps){
+  return abs(a - b) < eps;
+}
+
 #define cudaCheck(err) (cudaCheck_f(err, __FILE__, __LINE__))
 
-__device__ void compute(float* global_out, float const* shared_in, size_t batch) {
+__device__ void compute(float* global_out, float shared_in) {
     // Computes using all values of current batch from shared memory.
     // Stores this thread's result back to global memory.
-    volatile float m = 6.9f;
-    volatile float a = 4.20f;
     // printf("COMPUTE: %d => %lf (s)\n", threadIdx.x, shared_in[threadIdx.x]);
-    *(global_out + threadIdx.x) = m * shared_in[threadIdx.x] + a;
+    *(global_out + threadIdx.x) = 6.9f * shared_in + 4.20f;
 }
 
 __global__ void without_memcpy_async(float* global_out, float const* global_in, size_t size, size_t batch_sz) {
@@ -32,17 +36,16 @@ __global__ void without_memcpy_async(float* global_out, float const* global_in, 
 
   __shared__ float shared[1024]; // block.size() * sizeof(float) bytes
 
-  size_t local_idx = block.thread_rank();
-
+  #pragma unroll 1
   for (size_t batch = 0; batch < batch_sz; ++batch) {
     // Compute the index of the current batch for this block in global memory:
     size_t block_batch_idx = batch * blockDim.x;
     size_t global_idx = block_batch_idx + threadIdx.x;
-    shared[local_idx] = global_in[global_idx];
+    shared[threadIdx.x] = global_in[global_idx];
 
     block.sync(); // Wait for all copies to complete
     // printf("%d => %lf (g), %lf (s)\n", threadIdx.x, global_in[global_idx], shared[local_idx]);
-    compute(global_out + block_batch_idx, shared, batch); // Compute and write result to global memory
+    compute(global_out + block_batch_idx, shared[threadIdx.x]); // Compute and write result to global memory
     block.sync(); // Wait for compute using shared memory to finish
   }
 }
@@ -53,20 +56,71 @@ __global__ void with_memcpy_async(float* global_out, float const* global_in, siz
   auto block = cooperative_groups::this_thread_block();
   assert(size == batch_sz * grid.size()); // Exposition: input size fits batch_sz * grid_size
 
-  __shared__ float shared[1024]; // block.size() * sizeof(float) bytes
+  __align__(16) __shared__ float shared[1024]; // block.size() * sizeof(float) bytes
 
+  // Whole thread-group cooperatively copies whole batch to shared memory:
   #pragma unroll
   for (size_t batch = 0; batch < batch_sz; ++batch) {
-    size_t block_batch_idx = block.group_index().x * block.size() + grid.size() * batch;
-    // Whole thread-group cooperatively copies whole batch to shared memory:
-    cooperative_groups::memcpy_async(block, shared, global_in + block_batch_idx, sizeof(float) * block.size());
-
+    size_t block_batch_idx = grid.size() * batch;
+    cooperative_groups::memcpy_async(block, shared, global_in + block_batch_idx, cuda::aligned_size_t<16>(sizeof(float) * block.size()));
     cooperative_groups::wait(block); // Joins all threads, waits for all copies to complete
-
-    compute(global_out + block_batch_idx, shared, batch);
-
+    compute(global_out + block_batch_idx, shared[threadIdx.x]);
     block.sync();
   }
+}
+
+template<int block_dim, int num_stages>
+__global__ void pipelined(float* dest, float const* src, size_t size) {
+    // Read blockDim.x integers per pipeline stage
+    __shared__ float smem[num_stages][block_dim];
+ 
+    // Grid stride loop:
+    int offset = blockIdx.x * blockDim.x;
+    size_t stride = gridDim.x * blockDim.x;
+ 
+    // No pipeline::shared_state needed
+    cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
+ 
+    // Load all pipeline stages.
+    for (int stage = 0; stage < num_stages; ++stage) {
+        pipe.producer_acquire();
+        size_t idx = offset + stage * stride + threadIdx.x;
+        smem[stage][threadIdx.x] = 0.0f;
+        if (idx < size) {
+            cuda::memcpy_async(&smem[stage][threadIdx.x], &src[idx], sizeof(float), pipe);
+        }
+        pipe.producer_commit();
+    }
+ 
+    // At this point, there are `num_stages` commited into the pipeline. This is a loop.
+    // invariant that is upheld throughout the loop.
+    int stage = 0;
+    for (size_t block_idx = offset; block_idx < size; block_idx += stride) {
+        // Wait for the first stage to have completed loading, or equivalently: wait until
+        // at most `num_stages - 1` stages are still loading.
+        cuda::pipeline_consumer_wait_prior<num_stages - 1>(pipe);
+ 
+        // __syncthreads is necessary if other threads want to read this thread's loaded data.
+        // __syncthreads();
+        compute(dest + block_idx, smem[stage][threadIdx.x]);
+        __syncthreads();
+
+        // Release the consumed stage.
+        pipe.consumer_release();
+ 
+        // Pre-load data for `num_stages` into the future.
+        pipe.producer_acquire();
+        // To ensure that the number of commited stages into the pipeline remains constant,
+        // producer_acquire and producer_commit are called even if the load is out-of-bounds.
+        size_t idx = block_idx + num_stages * stride + threadIdx.x;
+        if (idx < size) {
+            cuda::memcpy_async(&smem[stage][threadIdx.x], &src[idx], sizeof(float), pipe);
+        }
+ 
+        pipe.producer_commit();
+ 
+        stage = (stage + 1) % num_stages;
+    }
 }
 
 
@@ -101,13 +155,14 @@ int main(int argc, char **argv) {
   cudaCheck(cudaGetLastError()); // Check for async errors during kernel run
 
   float elapsed_time;
-  float num_times = 1;
+  float num_times = 50;
   cudaEvent_t beg, end;
   cudaCheck(cudaEventCreate(&beg));
   cudaCheck(cudaEventCreate(&end));
   cudaCheck(cudaEventRecord(beg));
   for (int j = 0; j < num_times; j++) {
-    with_memcpy_async<<<1, 1024>>>(Ys_d, Xs_d, SIZE * SIZE, (SIZE*SIZE)/1024);
+    // with_memcpy_async<<<1, 1024>>>(Ys_d, Xs_d, SIZE * SIZE, (SIZE*SIZE)/1024);
+    pipelined<1024, 2><<<1, 1024>>>(Ys_d, Xs_d, SIZE*SIZE);
   }
   cudaCheck(cudaEventRecord(end));
   cudaCheck(cudaEventSynchronize(beg));
@@ -121,8 +176,13 @@ int main(int argc, char **argv) {
 
   cudaCheck(cudaMemcpy(Ys, Ys_d, SIZE * SIZE * sizeof(float), cudaMemcpyDeviceToHost));
 
-
-  printf("Validate: X: %lf, Y: %lf\n", Xs[235], Ys[235]);
+  for(int i=0;i<SIZE*SIZE;i++){
+    if(!floateq(Ys[i], 6.9f * Xs[i] + 4.20f, 0.001f)){
+      printf("Validation Failed (%d)! %lf => %lf\n", i, Xs[i], Ys[i]);
+      break;
+    }
+  }
+  printf("Validation Pass!\n");
 
   cudaCheck(cudaDeviceSynchronize());
 

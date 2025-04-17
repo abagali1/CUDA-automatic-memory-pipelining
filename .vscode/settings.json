@@ -15,7 +15,9 @@
         "initializer_list": "cpp",
         "utility": "cpp",
         "__config": "cpp",
-        "pipeline": "cpp"
+        "pipeline": "cpp",
+        "*.tcc": "cpp",
+        "streambuf": "cpp"
     },
     "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
 }

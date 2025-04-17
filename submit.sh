@@ -9,12 +9,13 @@
 #SBATCH --
 
 start_time=$(date +%s)
-module load cuda/12.6
+module load cuda/11.8
 
 # ./build/sgemm 4
 # ./gen_benchmark_results.sh
-ncu --set full -o profile_async -f ./build/simplest_kernel
+# ncu --set full -o profiling_data/profile_async_align -f ./simplest_kernel
+./build/simplest_kernel
 
 end_time=$(date +%s)
 runtime=$((end_time - start_time))
-echo "Total job runtime: $runtime seconds"
+echo "[SYNC] Total job runtime: $runtime seconds"

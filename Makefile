@@ -1,22 +1,18 @@
 .PHONY: all build debug clean profile bench cuobjdump
 
-CMAKE := cmake
+NVCC := nvcc 
 
 BUILD_DIR := build
-BENCHMARK_DIR := benchmark_results
 
 all: build
 
-build:
+simple:
 	@mkdir -p $(BUILD_DIR)
-	@cd $(BUILD_DIR) && $(CMAKE) -DCMAKE_BUILD_TYPE=Release ..
-	@$(MAKE) -C $(BUILD_DIR)
+	@cd $(BUILD_DIR) && nvcc -o simplest_kernel -keep -src-in-ptx -arch=sm_80 ../simplest_kernel.cu 
 
-debug:
+gemm:
 	@mkdir -p $(BUILD_DIR)
-	@cd $(BUILD_DIR) && $(CMAKE) -DCMAKE_BUILD_TYPE=Debug ..
-	@$(MAKE) -C $(BUILD_DIR)
-
+	@cd $(BUILD_DIR)
 clean:
 	@rm -rf $(BUILD_DIR)
 
