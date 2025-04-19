@@ -28,26 +28,26 @@ __device__ void compute(float* global_out, float shared_in) {
     *(global_out + threadIdx.x) = 6.9f * shared_in + 4.20f;
 }
 
-// __global__ void without_memcpy_async(float* global_out, float const* global_in, size_t size, size_t batch_sz) {
-//   auto grid = cooperative_groups::this_grid();
-//   auto block = cooperative_groups::this_thread_block();
-//   assert(size == batch_sz * grid.size()); // Exposition: input size fits batch_sz * grid_size
+__global__ void without_memcpy_async(float* global_out, float const* global_in, size_t size, size_t batch_sz) {
+  auto grid = cooperative_groups::this_grid();
+  auto block = cooperative_groups::this_thread_block();
+  assert(size == batch_sz * grid.size()); // Exposition: input size fits batch_sz * grid_size
 
-//   __shared__ float shared[1024]; // block.size() * sizeof(float) bytes
+  __shared__ float shared[1024]; // block.size() * sizeof(float) bytes
 
-//   #pragma unroll 1
-//   for (size_t batch = 0; batch < batch_sz; ++batch) {
-//     // Compute the index of the current batch for this block in global memory:
-//     size_t block_batch_idx = batch * blockDim.x;
-//     size_t global_idx = block_batch_idx + threadIdx.x;
-//     shared[threadIdx.x] = global_in[global_idx];
+  #pragma unroll 1
+  for (size_t batch = 0; batch < batch_sz; ++batch) {
+    // Compute the index of the current batch for this block in global memory:
+    size_t block_batch_idx = batch * blockDim.x;
+    size_t global_idx = block_batch_idx + threadIdx.x;
+    shared[threadIdx.x] = global_in[global_idx];
 
-//     block.sync(); // Wait for all copies to complete
-//     // printf("%d => %lf (g), %lf (s)\n", threadIdx.x, global_in[global_idx], shared[local_idx]);
-//     compute(global_out + block_batch_idx, shared[threadIdx.x]); // Compute and write result to global memory
-//     block.sync(); // Wait for compute using shared memory to finish
-//   }
-// }
+    block.sync(); // Wait for all copies to complete
+    // printf("%d => %lf (g), %lf (s)\n", threadIdx.x, global_in[global_idx], shared[local_idx]);
+    compute(global_out + block_batch_idx, shared[threadIdx.x]); // Compute and write result to global memory
+    block.sync(); // Wait for compute using shared memory to finish
+  }
+}
 
 
 // __global__ void with_memcpy_async(float* global_out, float const* global_in, size_t size, size_t batch_sz) {
@@ -78,34 +78,36 @@ __global__ void pipelined(float* dest, float const* src, size_t size) {
     size_t stride = gridDim.x * blockDim.x;
  
     // No pipeline::shared_state needed
-    cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
+    // cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
  
     // Load all pipeline stages.
     for (int stage = 0; stage < num_stages; ++stage) {
         // pipe.producer_acquire();
         size_t idx = offset + stage * stride + threadIdx.x;
         if (idx < size) {
-            asm volatile(
-              "cp.async.ca.shared.global [%0], [%1], %2, %3;\n"
-              :
-              : "r"(static_cast<std::uint32_t>(__cvta_generic_to_shared(&smem[stage][threadIdx.x]))),//  &smem[stage][threadIdx.x]), 
-                "l"(&src[idx]),
-                "n"(sizeof(float)), "n"(sizeof(float))
-              : "memory"
+          asm volatile(
+            "cp.async.ca.shared.global [%0], [%1], %2, %3;\n"
+            :
+            : "r"(static_cast<std::uint32_t>(__cvta_generic_to_shared(&smem[stage][threadIdx.x]))),
+              "l"(&src[idx]),
+              "n"(sizeof(float)), "n"(sizeof(float))
+            : "memory"
           );
-            // cuda::memcpy_async(&smem[stage][threadIdx.x], &src[idx], sizeof(float), pipe);
+          // cuda::memcpy_async(&smem[stage][threadIdx.x], &src[idx], sizeof(float), pipe);
         }
-        pipe.producer_commit();
+        asm volatile("cp.async.commit_group;");
+        // pipe.producer_commit();
     }
- 
+
     // At this point, there are `num_stages` commited into the pipeline. This is a loop.
     // invariant that is upheld throughout the loop.
     int stage = 0;
     for (size_t block_idx = offset; block_idx < size; block_idx += stride) {
         // Wait for the first stage to have completed loading, or equivalently: wait until
         // at most `num_stages - 1` stages are still loading.
-        cuda::pipeline_consumer_wait_prior<num_stages - 1>(pipe);
- 
+        // cuda::pipeline_consumer_wait_prior<num_stages - 1>(pipe);
+        asm volatile("cp.async.wait_group 1;");
+
         // __syncthreads is necessary if other threads want to read this thread's loaded data.
         // __syncthreads();
         compute(dest + block_idx, smem[stage][threadIdx.x]);
@@ -113,18 +115,26 @@ __global__ void pipelined(float* dest, float const* src, size_t size) {
 
         // Release the consumed stage.
         // pipe.consumer_release();
- 
+
         // Pre-load data for `num_stages` into the future.
         // pipe.producer_acquire();
         // To ensure that the number of commited stages into the pipeline remains constant,
         // producer_acquire and producer_commit are called even if the load is out-of-bounds.
         size_t idx = block_idx + num_stages * stride + threadIdx.x;
         if (idx < size) {
-            cuda::memcpy_async(&smem[stage][threadIdx.x], &src[idx], sizeof(float), pipe);
+              asm volatile(
+                "cp.async.ca.shared.global [%0], [%1], %2, %3;\n"
+                :
+                : "r"(static_cast<std::uint32_t>(__cvta_generic_to_shared(&smem[stage][threadIdx.x]))),//  &smem[stage][threadIdx.x]), 
+                  "l"(&src[idx]),
+                  "n"(sizeof(float)), "n"(sizeof(float))
+                : "memory"
+            );
+            // cuda::memcpy_async(&smem[stage][threadIdx.x], &src[idx], sizeof(float), pipe);
         }
- 
-        pipe.producer_commit();
- 
+        asm volatile("cp.async.commit_group;");
+        // pipe.producer_commit();
+
         stage = (stage + 1) % num_stages;
     }
 }

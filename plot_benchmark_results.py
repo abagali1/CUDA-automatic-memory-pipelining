@@ -24,6 +24,7 @@ KERNEL_NAMES = {
     2: "GMEM Coalescing",
     3: "SMEM Caching",
     4: "SMEM Caching Async",
+    5: "SMEM Caching Async Pipeline"
     # 4: "1D Blocktiling",
     # 5: "2D Blocktiling",
     # 6: "Vectorized Mem Access",

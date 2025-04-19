@@ -19,7 +19,9 @@
         "*.tcc": "cpp",
         "streambuf": "cpp",
         "barrier": "cpp",
-        "type_traits": "cpp"
+        "type_traits": "cpp",
+        "__target_macros": "cpp",
+        "cstddef": "cpp"
     },
     "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
 }

@@ -54,14 +54,14 @@ __global__ void sgemm_shared_mem_block_async(int M, int N, int K, float alpha,
       tile,
       As[tile.meta_group_rank()],
       A + (tile.meta_group_rank() * K),
-      cuda::aligned_size_t<16>(sizeof(float) * tile.size())
+      cuda::aligned_size_t<128>(sizeof(float) * tile.size())
     );
 
     cg::memcpy_async(
       tile,
       Bs[tile.meta_group_rank()],
       B + (tile.meta_group_rank() * K),
-      cuda::aligned_size_t<16>(sizeof(float) * tile.size())
+      cuda::aligned_size_t<128>(sizeof(float) * tile.size())
     );
 
     // if(cRow == 0 && cCol == 0){

@@ -4,15 +4,16 @@ NVCC := nvcc
 
 BUILD_DIR := build
 
-all: build
+all: gemm
 
 simple:
 	@mkdir -p $(BUILD_DIR)
-	@cd $(BUILD_DIR) && nvcc -o simplest_kernel -keep -src-in-ptx -arch=sm_80 ../simplest_kernel.cu 
+	@cd $(BUILD_DIR) && nvcc -o simplest_kernel -keep -src-in-ptx -arch=sm_80 -lineinfo -g -O0 ../simplest_kernel.cu
 
 gemm:
 	@mkdir -p $(BUILD_DIR)
-	@cd $(BUILD_DIR)
+	@cd $(BUILD_DIR) && nvcc -o sgemm -keep -src-in-ptx -arch=sm_80 -lineinfo -g -O0 -I../src ../sgemm.cu ../src/runner.cu
+
 clean:
 	@rm -rf $(BUILD_DIR)
 
