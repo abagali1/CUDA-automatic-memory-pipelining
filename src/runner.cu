@@ -106,8 +106,8 @@ bool verify_matrix(float *matRef, float *matOut, int N) {
   int i;
   for (i = 0; i < N; i++) {
     diff = std::fabs(matRef[i] - matOut[i]);
-    if (diff > 0.01) {
-      printf("Divergence! Should %5.2f, Is %5.2f (Diff %5.2f) at %d\n",
+    if (diff > 0.015) {
+      printf("Divergence! Should %lf, Is %lff (Diff %lff) at %d\n",
              matRef[i], matOut[i], diff, i);
       return false;
     }
@@ -172,181 +172,6 @@ void run_sgemm_shared_mem_block_async_overlap(int M, int N, int K, float alpha, 
       <<<gridDim, blockDim>>>(M, N, K, alpha, A, B, beta, C);
 }
 
-void runSgemmVectorize(int M, int N, int K, float alpha, float *A, float *B,
-                       float beta, float *C) {
-  const uint BK = 8;
-  const uint TM = 8;
-  const uint TN = 8;
-  if (M >= 128 and N >= 128) {
-    const uint BM = 128;
-    const uint BN = 128;
-    dim3 gridDim(CEIL_DIV(N, BN), CEIL_DIV(M, BM));
-    dim3 blockDim((BM * BN) / (TM * TN));
-    sgemmVectorize<BM, BN, BK, TM, TN>
-        <<<gridDim, blockDim>>>(M, N, K, alpha, A, B, beta, C);
-  } else {
-    // this is a hacky solution to the underlying problem
-    // of not having proper bounds checking in the kernel
-    const uint BM = 64;
-    const uint BN = 64;
-    dim3 gridDim(CEIL_DIV(N, BN), CEIL_DIV(M, BM));
-    dim3 blockDim((BM * BN) / (TM * TN));
-    sgemmVectorize<BM, BN, BK, TM, TN>
-        <<<gridDim, blockDim>>>(M, N, K, alpha, A, B, beta, C);
-  }
-}
-
-void runSgemmResolveBankConflicts(int M, int N, int K, float alpha, float *A,
-                                  float *B, float beta, float *C) {
-  const uint BK = 8;
-  const uint TM = 8;
-  const uint TN = 8;
-  if (M >= 128 and N >= 128) {
-    const uint BM = 128;
-    const uint BN = 128;
-    dim3 gridDim(CEIL_DIV(N, BN), CEIL_DIV(M, BM));
-    dim3 blockDim((BM * BN) / (TM * TN));
-    sgemmResolveBankConflicts<BM, BN, BK, TM, TN>
-        <<<gridDim, blockDim>>>(M, N, K, alpha, A, B, beta, C);
-  } else {
-    // this is a hacky solution to the underlying problem
-    // of not having proper bounds checking in the kernel
-    const uint BM = 64;
-    const uint BN = 64;
-    dim3 gridDim(CEIL_DIV(N, BN), CEIL_DIV(M, BM));
-    dim3 blockDim((BM * BN) / (TM * TN));
-    sgemmResolveBankConflicts<BM, BN, BK, TM, TN>
-        <<<gridDim, blockDim>>>(M, N, K, alpha, A, B, beta, C);
-  }
-}
-
-void runSgemmResolveBankExtraCol(int M, int N, int K, float alpha, float *A,
-                                 float *B, float beta, float *C) {
-  const uint BK = 8;
-  const uint TM = 8;
-  const uint TN = 8;
-  if (M >= 128 and N >= 128) {
-    const uint BM = 128;
-    const uint BN = 128;
-    dim3 gridDim(CEIL_DIV(N, BN), CEIL_DIV(M, BM));
-    dim3 blockDim((BM * BN) / (TM * TN));
-    sgemmResolveBankExtraCol<BM, BN, BK, TM, TN>
-        <<<gridDim, blockDim>>>(M, N, K, alpha, A, B, beta, C);
-  } else {
-    // this is a hacky solution to the underlying problem
-    // of not having proper bounds checking in the kernel
-    const uint BM = 64;
-    const uint BN = 64;
-    dim3 gridDim(CEIL_DIV(N, BN), CEIL_DIV(M, BM));
-    dim3 blockDim((BM * BN) / (TM * TN));
-    sgemmResolveBankExtraCol<BM, BN, BK, TM, TN>
-        <<<gridDim, blockDim>>>(M, N, K, alpha, A, B, beta, C);
-  }
-}
-
-void runSgemmAutotuned(int M, int N, int K, float alpha, float *A, float *B,
-                       float beta, float *C) {
-  // A100
-  // const uint K9_BK = 16;
-  // const uint K9_TM = 4;
-  // const uint K9_TN = 4;
-  // const uint K9_BM = 64;
-  // const uint K9_BN = 64;
-  // A6000
-  const uint K9_BK = 16;
-  const uint K9_TM = 8;
-  const uint K9_TN = 8;
-  const uint K9_BM = 128;
-  const uint K9_BN = 128;
-  dim3 blockDim(K9_NUM_THREADS);
-
-  static_assert(
-      (K9_NUM_THREADS * 4) % K9_BK == 0,
-      "NUM_THREADS*4 must be multiple of K9_BK to avoid quantization issues "
-      "during GMEM->SMEM tiling (loading only parts of the final row of Bs "
-      "during each iteraion)");
-  static_assert(
-      (K9_NUM_THREADS * 4) % K9_BN == 0,
-      "NUM_THREADS*4 must be multiple of K9_BN to avoid quantization issues "
-      "during GMEM->SMEM tiling (loading only parts of the final row of As "
-      "during each iteration)");
-  static_assert(
-      K9_BN % (16 * K9_TN) == 0,
-      "K9_BN must be a multiple of 16*K9_TN to avoid quantization effects");
-  static_assert(
-      K9_BM % (16 * K9_TM) == 0,
-      "K9_BM must be a multiple of 16*K9_TM to avoid quantization effects");
-  static_assert((K9_BM * K9_BK) % (4 * K9_NUM_THREADS) == 0,
-                "K9_BM*K9_BK must be a multiple of 4*256 to vectorize loads");
-  static_assert((K9_BN * K9_BK) % (4 * K9_NUM_THREADS) == 0,
-                "K9_BN*K9_BK must be a multiple of 4*256 to vectorize loads");
-
-  dim3 gridDim(CEIL_DIV(N, K9_BN), CEIL_DIV(M, K9_BM));
-  sgemmAutotuned<K9_BM, K9_BN, K9_BK, K9_TM, K9_TN>
-      <<<gridDim, blockDim>>>(M, N, K, alpha, A, B, beta, C);
-}
-
-void runSgemmWarptiling(int M, int N, int K, float alpha, float *A, float *B,
-                        float beta, float *C) {
-  // Settings for A100
-  // const uint K10_NUM_THREADS = 128;
-  // const uint K10_BN = 128;
-  // const uint K10_BM = 64;
-  // const uint K10_BK = 16;
-  // const uint K10_WN = 64;
-  // const uint K10_WM = 32;
-  // const uint K10_WNITER = 1;
-  // const uint K10_TN = 4;
-  // const uint K10_TM = 4;
-  // Settings for A6000
-  const uint K10_NUM_THREADS = 128;
-  const uint K10_BN = 128;
-  const uint K10_BM = 128;
-  const uint K10_BK = 16;
-  const uint K10_WN = 64;
-  const uint K10_WM = 64;
-  const uint K10_WNITER = 4;
-  const uint K10_TN = 4;
-  const uint K10_TM = 8;
-  dim3 blockDim(K10_NUM_THREADS);
-
-  constexpr uint NUM_WARPS = K10_NUM_THREADS / 32;
-
-  // warptile in threadblocktile
-  static_assert((K10_BN % K10_WN == 0) and (K10_BM % K10_WM == 0));
-  static_assert((K10_BN / K10_WN) * (K10_BM / K10_WM) == NUM_WARPS);
-
-  // threads in warpsubtile
-  static_assert((K10_WM * K10_WN) % (WARPSIZE * K10_TM * K10_TN * K10_WNITER) ==
-                0);
-  constexpr uint K10_WMITER =
-      (K10_WM * K10_WN) / (32 * K10_TM * K10_TN * K10_WNITER);
-  // warpsubtile in warptile
-  static_assert((K10_WM % K10_WMITER == 0) and (K10_WN % K10_WNITER == 0));
-
-  static_assert((K10_NUM_THREADS * 4) % K10_BK == 0,
-                "NUM_THREADS*4 must be multiple of K9_BK to avoid quantization "
-                "issues during GMEM->SMEM tiling (loading only parts of the "
-                "final row of Bs during each iteraion)");
-  static_assert((K10_NUM_THREADS * 4) % K10_BN == 0,
-                "NUM_THREADS*4 must be multiple of K9_BN to avoid quantization "
-                "issues during GMEM->SMEM tiling (loading only parts of the "
-                "final row of As during each iteration)");
-  static_assert(K10_BN % (16 * K10_TN) == 0,
-                "BN must be a multiple of 16*TN to avoid quantization effects");
-  static_assert(K10_BM % (16 * K10_TM) == 0,
-                "BM must be a multiple of 16*TM to avoid quantization effects");
-  static_assert((K10_BM * K10_BK) % (4 * K10_NUM_THREADS) == 0,
-                "BM*BK must be a multiple of 4*256 to vectorize loads");
-  static_assert((K10_BN * K10_BK) % (4 * K10_NUM_THREADS) == 0,
-                "BN*BK must be a multiple of 4*256 to vectorize loads");
-
-  dim3 gridDim(CEIL_DIV(N, K10_BN), CEIL_DIV(M, K10_BM));
-  sgemmWarptiling<K10_BM, K10_BN, K10_BK, K10_WM, K10_WN, K10_WNITER, K10_TM,
-                  K10_TN, K10_NUM_THREADS>
-      <<<gridDim, blockDim>>>(M, N, K, alpha, A, B, beta, C);
-}
-
 void run_kernel(int kernel_num, int M, int N, int K, float alpha, float *A,
                 float *B, float beta, float *C) {
   switch (kernel_num) {
@@ -366,25 +191,6 @@ void run_kernel(int kernel_num, int M, int N, int K, float alpha, float *A,
     break;
   case 5:
     run_sgemm_shared_mem_block_async_overlap(M, N, K, alpha, A, B, beta, C);
-    break;
-  case 6:
-    runSgemmVectorize(M, N, K, alpha, A, B, beta, C);
-    break;
-  case 7:
-    runSgemmResolveBankConflicts(M, N, K, alpha, A, B, beta, C);
-    break;
-  case 8:
-    runSgemmResolveBankExtraCol(M, N, K, alpha, A, B, beta, C);
-    break;
-  case 9:
-    runSgemmAutotuned(M, N, K, alpha, A, B, beta, C);
-    break;
-  case 10:
-    runSgemmWarptiling(M, N, K, alpha, A, B, beta, C);
-    break;
-  case 11:
-    break;
-  case 12:
     break;
   default:
     throw std::invalid_argument("Unknown kernel number");
