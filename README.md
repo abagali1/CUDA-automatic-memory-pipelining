@@ -6,10 +6,8 @@ EECS 570 Final Project
 * clone folder and cd into folder
 
 ```bash
-module load cuda/12.6
-mkdir build && cd build
-cmake ..
-make 
+source env.sh
+make
 ```
 
 This will create the `sgemm` executable

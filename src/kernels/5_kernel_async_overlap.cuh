@@ -60,38 +60,43 @@ __global__ void sgemm_shared_mem_block_async_overlap(int M, int N, int K, float 
   size_t stage;
   size_t fetch_batch;
 
+  #pragma unroll 1
   for(fetch_batch=0;fetch_batch < 2 && fetch_batch < batch_sz;fetch_batch++){
     stage = fetch_batch % 2;
 
-    cuda::memcpy_async(thread, &As[stage][threadRow][threadCol], &A[threadRow * K + threadCol], 4, pipe);
-    cuda::memcpy_async(thread, &Bs[stage][threadRow][threadCol], &B[threadRow * K + threadCol], 4, pipe); 
+    cuda::memcpy_async(thread, &As[stage][threadRow][threadCol], &A[threadRow * K + threadCol], sizeof(float), pipe); 
+    cuda::memcpy_async(thread, &Bs[stage][threadRow][threadCol], &B[threadRow * K + threadCol], sizeof(float), pipe); 
 
-    asm volatile(
-        "cp.async.commit_group;\n"
-    );
+    pipe.producer_commit();
+    // asm volatile(
+    //     "cp.async.commit_group;\n"
+    // );
     A += BLOCKSIZE;
     B += BLOCKSIZE * N; 
   }
 
+  #pragma unroll 1
   for(size_t compute_batch = 0;compute_batch < batch_sz;compute_batch++){
     stage = compute_batch % 2;
-    asm volatile(
-      "cp.async.wait_group 1;\n"
-    );
-    printf("A[%d, %d] => %lf\n", threadRow, threadCol, As[stage][threadRow][threadCol]);
-    printf("B[%d, %d] => %lf\n", threadRow, threadCol, Bs[stage][threadRow][threadCol]);
+    // asm volatile(
+    //   "cp.async.wait_group 1;\n"
+    // );
+    pipe.consumer_wait();
+    printf("A[%d, %d] => %f\n", threadRow, threadCol, As[stage][threadRow][threadCol]);
+    printf("B[%d, %d] => %f\n", threadRow, threadCol, Bs[stage][threadRow][threadCol]);
+
     __syncthreads();
-    printf("POST A[%d, %d] => %lf\n", threadRow, threadCol, As[stage][threadRow][threadCol]);
-    printf("POST B[%d, %d] => %lf\n", threadRow, threadCol, Bs[stage][threadRow][threadCol]);
     tmp += compute<BLOCKSIZE>(As[stage], Bs[stage], threadRow, threadCol);
     __syncthreads();
+    pipe.consumer_release();
 
     if(fetch_batch + compute_batch < batch_sz){
-      cuda::memcpy_async(thread, &As[stage][threadRow][threadCol], &A[threadRow * K + threadCol], 4, pipe);
-      cuda::memcpy_async(thread, &Bs[stage][threadRow][threadCol], &B[threadRow * K + threadCol], 4, pipe);
-      asm volatile(
-        "cp.async.commit_group;\n"
-      );
+      cuda::memcpy_async(thread, &As[stage][threadRow][threadCol], &A[threadRow * K + threadCol], sizeof(float), pipe);
+      cuda::memcpy_async(thread, &Bs[stage][threadRow][threadCol], &B[threadRow * K + threadCol], sizeof(float), pipe);
+      pipe.producer_commit();
+      // asm volatile(
+      //   "cp.async.commit_group;\n"
+      // );
       A += BLOCKSIZE;
       B += BLOCKSIZE * N;
     }
