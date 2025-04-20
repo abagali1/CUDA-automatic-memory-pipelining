@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 
 float get_sec() {
   struct timeval time;
@@ -176,23 +177,22 @@ void run_kernel(int kernel_num, int M, int N, int K, float alpha, float *A,
                 float *B, float beta, float *C) {
   switch (kernel_num) {
   case 0:
-    break;
-  case 1:
     run_sgemm_naive(M, N, K, alpha, A, B, beta, C);
     break;
-  case 2:
+  case 1:
     run_sgemm_coalesce(M, N, K, alpha, A, B, beta, C);
     break;
-  case 3:
+  case 2:
     run_sgemm_shared_mem_block(M, N, K, alpha, A, B, beta, C);
     break;
-  case 4:
+  case 3:
     run_sgemm_shared_mem_block_async(M, N, K, alpha, A, B, beta, C);
     break;
-  case 5:
+  case 4:
     run_sgemm_shared_mem_block_async_overlap(M, N, K, alpha, A, B, beta, C);
     break;
   default:
+    std::cout << "BAD: " << kernel_num << std::endl;
     throw std::invalid_argument("Unknown kernel number");
   }
 }

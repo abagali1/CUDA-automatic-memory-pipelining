@@ -21,17 +21,9 @@ plt.rcParams["savefig.facecolor"] = "white"
 
 KERNEL_NAMES = {
     1: "Naive",
-    2: "GMEM Coalescing",
-    3: "SMEM Caching",
-    4: "SMEM Caching Async",
-    5: "SMEM Caching Async Pipeline"
-    # 4: "1D Blocktiling",
-    # 5: "2D Blocktiling",
-    # 6: "Vectorized Mem Access",
-    # 7: "Avoid Bank Conflicts (Linearize)",
-    # 8: "Avoid Bank Conflicts (Offset)",
-    # 9: "Autotuning",
-    # 10: "Warptiling",
+    2: "SMEM Baseline",
+    3: "SMEM Async (no pipeline)",
+    4: "SMEM Pipelined Async"
 }
 
 
@@ -78,7 +70,7 @@ def plot(df: pd.DataFrame):
         # right align the text
         plt.text(
             df[df["kernel"] == i+1]["size"].iloc[-1],
-            df[df["kernel"] == i+1]["gflops"].iloc[-1] + 300,
+            df[df["kernel"] == i+1]["gflops"].iloc[-1] + 50,
             f"{i+1}:{KERNEL_NAMES[i+1]}",
             color=colors[i],
             horizontalalignment="left",
@@ -88,9 +80,9 @@ def plot(df: pd.DataFrame):
     # turn of the legend
     plt.gca().get_legend().remove()
 
-    plt.title("Performance of different kernels")
-    plt.xlabel("Matrix size (square, one side)")
-    plt.ylabel("GFLOPs/s")
+    plt.title("Performance of different kernels", fontsize=25)
+    plt.xlabel("Matrix size (square, one side)", fontsize=20)
+    plt.ylabel("GFLOPs/s", fontsize=20)
     plt.tight_layout()
 
     plt.savefig(save_dir / "benchmark_results.png")
@@ -118,19 +110,3 @@ if __name__ == "__main__":
     # df["relperf"] = df["gflops"] / df[df["kernel"] == "0: cuBLAS"]["gflops"].iloc[0]
     # df["relperf"] = df["relperf"].apply(lambda x: f"{x*100:.1f}%")
     # df.columns = ["Kernel", "GFLOPs/s", "Performance relative to cuBLAS"]
-
-    # update the README.md with the new results
-    with open("README.md", "r") as f:
-        readme = f.read()
-    # delete old results
-    readme = re.sub(
-        r"<!-- benchmark_results -->.*<!-- benchmark_results -->",
-        "<!-- benchmark_results -->\n{}\n<!-- benchmark_results -->".format(
-            df.to_markdown(index=False)
-        ),
-        readme,
-        flags=re.DOTALL,
-    )
-    # input new results
-    with open("README.md", "w") as f:
-        f.write(readme)
