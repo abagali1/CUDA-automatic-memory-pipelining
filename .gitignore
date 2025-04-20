@@ -4,7 +4,6 @@ build_ir/
 cmake-build-debug/
 cmake-build-release/
 .idea/
-profiling_data/
 
 # VSCode, but include settings.json
 .vscode/*
