@@ -1,6 +1,7 @@
 *.out
 build/
 build_ir/
+build_cuda/
 cmake-build-debug/
 cmake-build-release/
 .idea/

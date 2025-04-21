@@ -1,2 +1,3 @@
 module load cuda/11.8
-module load llvm
+export PATH="$HOME/llvm-install/bin:$PATH"
+

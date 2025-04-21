@@ -10,10 +10,11 @@
 start_time=$(date +%s)
 module load cuda/11.8
 
-# ./build/sgemm 4
+# ./build_cuda/sgemm 4
 # ./gen_benchmark_results.sh
-ncu --set full -o profiling_data/smem_sync -f ./build/sgemm 2
+# ncu --set full -o profiling_data/smem_sync -f ./build/sgemm 2
 # ./build/simplest_kernel
+./build_ir/sgemm_opt 4
 
 end_time=$(date +%s)
 runtime=$((end_time - start_time))
