@@ -214,7 +214,7 @@ namespace {
       return path;
     }
 
-    bool is_tiling_loop(Loop *l, std::map<Instruction*, Instruction*> &final_pairs){
+    bool is_tiling_loop(Loop *l, std::map<Instruction*, Instruction*> &final_pairs, BasicBlock* &first_barrier_bb, BasicBlock* &second_barrier_bb){
       if(l->getParentLoop() != nullptr){
         return false;
       }
@@ -262,6 +262,9 @@ namespace {
       }
 
       std::vector<BasicBlock*> barrier_traversal = loop_traverse(l, header, first_barrier->getParent());
+
+      first_barrier_bb = first_barrier->getParent();
+      second_barrier_bb = second_barrier->getParent();
 
       // verify global->shared pattern and return instruction pairs
       auto load_store_pairs = check_transfer_reqs(barrier_traversal);
@@ -366,15 +369,13 @@ namespace {
                                             true // hasSideEffects
         );
 
-        // // Insert inline asm into loop where load originally was
-        // errs() << "BEFORE CREATE CALL\n";
+
         CallInst *inserted = insertBuilder.CreateCall(cpAsync, {dstInt, srcPtr});
 
         if(lastInserted == nullptr || lastInserted->comesBefore(inserted)){
           lastInserted = inserted;
         }
-        // errs() << "AFTER CREATE CALL\n";
-        // // Erase the original load and store
+
         storeInst->eraseFromParent();
         loadInst->eraseFromParent();
 
@@ -386,12 +387,164 @@ namespace {
         });
         depchains.push_back(std::move(chain));
       }
-      // IRBuilder<> insertBuilder(lastInserted->getNextNode());
-      // FunctionType *commitType = FunctionType::get(insertBuilder.getVoidTy(), {}, false);
-      // InlineAsm *commitAsync = InlineAsm::get(commitType, "cp.async.commit_group;", "", true);
-      // insertBuilder.CreateCall(commitAsync, {});
 
       return depchains;
+    }
+
+    void replaceTxBasicBlock(std::vector<std::vector<Instruction*>> &depchains) {
+      
+      for (auto chain : depchains) {
+        for (auto* inst : chain) {
+          inst->eraseFromParent();
+        }
+      }
+      
+      // for (auto it = bb->begin(), end = bb->end(); it != end;) {
+      //   Instruction *inst = &*it++;
+        
+      //   // Erase the instruction from the current BasicBlock
+      //   inst->eraseFromParent();
+      // }
+  
+      // IRBuilder<> insertBuilder(&bb->back());
+  
+      // Value *two = insertBuilder.getInt32(2);
+      // Value *stage = insertBuilder.CreateURem(ind, two, "stage");
+  
+      // FunctionType *waitType = FunctionType::get(insertBuilder.getVoidTy(), {}, false);
+      // InlineAsm *waitAsync = InlineAsm::get(waitType, "cp.async.wait_group 1;", "", true);
+  
+      // insertBuilder.CreateCall(waitAsync, {});
+  }
+  
+
+
+    void addAsyncTransfer(BasicBlock* bb, std::vector<std::vector<Instruction*>> &depchains, PHINode *inductor) {
+      IRBuilder<> insertBuilder(&bb->back());
+  
+      Value *inductorPlus2 = insertBuilder.CreateAdd(inductor, ConstantInt::get(inductor->getType(), 2), "inductor_plus_2");
+  
+      for (auto& chain : depchains) {
+          for (Instruction *inst : chain) {
+              Instruction *cloned = inst->clone();
+  
+              for (unsigned i = 0; i < cloned->getNumOperands(); ++i) {
+                  if (cloned->getOperand(i) == inductor) {
+                      cloned->setOperand(i, inductorPlus2);
+                  }
+              }
+  
+              if (cloned == inductor) {
+                  for (unsigned i = 0; i < inductor->getNumOperands(); ++i) {
+                      inductor->setIncomingValue(i, inductorPlus2);
+                  }
+              }
+  
+              insertBuilder.Insert(cloned);
+          }
+      }
+  
+      FunctionType *commitType = FunctionType::get(insertBuilder.getVoidTy(), {}, false);
+      InlineAsm *commitAsync = InlineAsm::get(commitType, "cp.async.commit_group;", "", true);
+      insertBuilder.CreateCall(commitAsync, {});
+  }
+
+
+    Value *getLoopLimit(Loop *L) {
+      // Step 1: Get canonical induction variable
+      PHINode *IndVar = L->getCanonicalInductionVariable();
+      if (!IndVar) {
+          errs() << "Loop does not have a canonical induction variable.\n";
+          return nullptr;
+      }
+  
+      // Step 2: Get the unique exiting block
+      BasicBlock *ExitingBlock = L->getExitingBlock();
+      if (!ExitingBlock) {
+          errs() << "Loop does not have a unique exiting block.\n";
+          return nullptr;
+      }
+  
+      // Step 3: Get the conditional branch instruction
+      BranchInst *BI = dyn_cast<BranchInst>(ExitingBlock->getTerminator());
+      if (!BI || !BI->isConditional()) {
+          errs() << "Exiting block does not end with a conditional branch.\n";
+          return nullptr;
+      }
+  
+      // Step 4: Get the condition and cast it to a compare instruction
+      ICmpInst *Cmp = dyn_cast<ICmpInst>(BI->getCondition());
+      if (!Cmp) {
+          errs() << "Expected ICmp instruction in the branch condition.\n";
+          return nullptr;
+      }
+  
+      // Step 5: Identify which operand is the induction variable
+      Value *Op0 = Cmp->getOperand(0);
+      Value *Op1 = Cmp->getOperand(1);
+  
+      if (Op0 == IndVar) {
+          return Op1; // limit is the other operand
+      } else if (Op1 == IndVar) {
+          return Op0;
+      }
+  
+      errs() << "Induction variable is not part of the comparison.\n";
+      return nullptr;
+  }
+
+    BasicBlock* addMemTransferCondition(BasicBlock* BB, PHINode* ind, Value* loop_limit) {
+
+      Instruction *Term = BB->getTerminator();
+      if (!Term) {
+          errs() << "Basic block does not have a terminator!\n";
+          return nullptr;
+      }
+  
+      // Get the successor before removing the terminator
+      Instruction *OldTerm = BB->getTerminator();
+      if (OldTerm->getNumSuccessors() == 0) {
+          errs() << "Expected the basic block to have at least one successor\n";
+          return nullptr;
+      }
+      BasicBlock *OriginalSuccessor = OldTerm->getSuccessor(0);
+      
+      // Remove the old terminator
+      OldTerm->eraseFromParent();
+
+      // Create an IRBuilder at the end of the basic block
+      IRBuilder<> Builder(BB);
+
+      // Compute InductionVar + 2
+      Value *IndPlus2 = Builder.CreateAdd(ind, ConstantInt::get(ind->getType(), 2), "indplus2");
+
+      // Compare (ind + 2) < loop limit
+      Value *Cond = Builder.CreateICmpSLT(IndPlus2, loop_limit, "cond");
+
+      // Create a new basic block for the 'then' branch (loop continuation)
+      Function *F = BB->getParent();
+      BasicBlock *ThenBB = BasicBlock::Create(BB->getContext(), "new_mem_transfer", F);
+
+      // Add a branch based on the condition
+      Builder.CreateCondBr(Cond, ThenBB, OriginalSuccessor);
+
+      // Add a dummy terminator to the new 'then' block for now
+      IRBuilder<> ThenBuilder(ThenBB);
+      ThenBuilder.CreateBr(OriginalSuccessor); // you can customize this branch target as needed
+
+      return ThenBB;
+    }
+
+
+
+    void printDepchains(std::vector<std::vector<Instruction*>> &depchains) {
+      for (unsigned i = 0; i < depchains.size(); ++i) {
+        errs() << "Depchain " << i << ":\n";
+        for (Instruction *inst : depchains[i]) {
+          // Print the instruction opcode and its operands (if any)
+          errs() << "  Instruction: " << *inst << "\n";
+        }
+      }
     }
 
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
@@ -405,62 +558,56 @@ namespace {
       this->top_level_module = F.getParent();
       for(Loop *L: li){
         std::map<Instruction*, Instruction*> load_store_pairs;
-        if(is_tiling_loop(L, load_store_pairs)){
+        BasicBlock* second_barrier_bb;
+        BasicBlock* first_barrier_bb;
+        if(is_tiling_loop(L, load_store_pairs, first_barrier_bb, second_barrier_bb)){
           std::vector<std::vector<Instruction*>> depchains = replaceLSPairs(L, load_store_pairs);
           PHINode *ind = getInductionVariable(L);
-          auto *preheader = L->getLoopPreheader();
+          auto preheader = L->getLoopPreheader();
+          
+          
+          BasicBlock* mem_transfer_bb = addMemTransferCondition(second_barrier_bb, ind, getLoopLimit(L));
+          addAsyncTransfer(mem_transfer_bb, depchains, ind);
+          replaceTxBasicBlock(depchains);
 
-          llvm::IRBuilder<> builder(preheader->getTerminator());
-          for(int i=0;i<1;i++){
-            for(auto &chain: depchains){
-              for(Instruction *inst: chain){
-                inst->print(errs());
-                errs() << " " << inst->getName() << "\n";
-                Instruction *clone = inst->clone();
 
-                for(unsigned o=0;o < clone->getNumOperands(); o++){
-                  if(clone->getOperand(o) == ind){
-                    llvm::ConstantInt *const_stage = llvm::ConstantInt::get(llvm::Type::getInt32Ty(clone->getContext()), i);
-                    clone->setOperand(o, const_stage);
-                  }
-                }
+          // for(int i=0;i<2;i++){
+          //   for(auto &chain: depchains){
+          //     for(Instruction *inst: chain){
+          //       Instruction *clone = inst->clone();
 
-                // if(auto *gep = dyn_cast<GetElementPtrInst>(clone)){
-                //   auto *addr_ptr = gep->getPointerOperand();
-                //   if (auto *asc = llvm::dyn_cast<llvm::AddrSpaceCastInst>(addr_ptr)) {
-                //     addr_ptr = asc->getOperand(0); // strip the addrspacecast
+          //       for(unsigned o=0;o < clone->getNumOperands(); o++){
+          //         if(clone->getOperand(o) == ind){
+          //           llvm::ConstantInt *const_stage = llvm::ConstantInt::get(llvm::Type::getInt32Ty(clone->getContext()), i);
+          //           clone->setOperand(o, const_stage);
+          //         }
+          //       }
 
-                //     llvm::Type *ptrTy = addr_ptr->getType();
-                //     if (auto *ptrPtrTy = llvm::dyn_cast<llvm::PointerType>(ptrTy)) {
-                //       unsigned as = ptrPtrTy->getAddressSpace();
-                //       if (as == 3) {
-                //         std::vector<llvm::Value*> indices(gep->idx_begin(), gep->idx_end());
+          //       if(auto *gep: dyn_cast<GetElementPtrInst>(clone)){
+          //         auto *addr_ptr = gep->getPointerOperand();
+          //         if (auto *asc = llvm::dyn_cast<llvm::AddrSpaceCastInst>(ptr)) {
+          //           addr_ptr = asc->getOperand(0); // strip the addrspacecast
 
-                //         // Assume flat GEP like: getelementptr float, ptr base, i64 idx
-                //         // Modify the first index (only if GEP is into flat pointer like float*)
-                //         if (!indices.empty()) {
-                //             llvm::Value *originalIndex = indices[0];
-                //             llvm::Constant *offset = llvm::ConstantInt::get(originalIndex->getType(), this->tile_size * this->tile_size * (i % 2));
-                //             llvm::Value *newIndex = llvm::BinaryOperator::CreateAdd(originalIndex, offset, "shifted_idx");
+          //           llvm::Type *ptrTy = ptr->getType();
+          //           if (auto *ptrPtrTy = llvm::dyn_cast<llvm::PointerType>(ptrTy)) {
+          //               unsigned as = ptrPtrTy->getAddressSpace();
+          //               if (as == 3) {
+                          
+          //               }
+          //           }
+          //         }
+          //       }
+          //     }
+          //   }
+          // }
 
-                //             indices[0] = newIndex;
-                //         }
-                //         clone = llvm::GetElementPtrInst::Create(
-                //           gep->getSourceElementType(),
-                //           gep->getPointerOperand(),
-                //           indices
-                //         );
-                //       }
-                //     }
-                //   }
-                // }
 
-                builder.Insert(clone);
-                inst->replaceAllUsesWith(clone);
-                inst->eraseFromParent();
-              }
-            }
-          }
+
+
+
+
+
+
 
 
 
