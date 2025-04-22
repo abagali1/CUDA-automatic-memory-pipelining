@@ -391,13 +391,7 @@ namespace {
       return depchains;
     }
 
-    void replaceTxBasicBlock(std::vector<std::vector<Instruction*>> &depchains) {
-      
-      for (auto chain : depchains) {
-        for (auto* inst : chain) {
-          inst->eraseFromParent();
-        }
-      }
+    llvm::Value* replaceTxBasicBlock(std::vector<std::vector<Instruction*>> &depchains, PHINode *ind) {
       
       // for (auto it = bb->begin(), end = bb->end(); it != end;) {
       //   Instruction *inst = &*it++;
@@ -405,42 +399,60 @@ namespace {
       //   // Erase the instruction from the current BasicBlock
       //   inst->eraseFromParent();
       // }
+
+      BasicBlock *bb = ind->getParent()->getTerminator()->getSuccessor(0);
+
+      IRBuilder<> insertBuilder(bb->getFirstNonPHI());
   
-      // IRBuilder<> insertBuilder(&bb->back());
+      Value *two = insertBuilder.getInt32(2);
+      Value *stage = insertBuilder.CreateURem(ind, two, "stage");
   
-      // Value *two = insertBuilder.getInt32(2);
-      // Value *stage = insertBuilder.CreateURem(ind, two, "stage");
+      FunctionType *waitType = FunctionType::get(insertBuilder.getVoidTy(), {}, false);
+      InlineAsm *waitAsync = InlineAsm::get(waitType, "cp.async.wait_group 1;", "", true);
   
-      // FunctionType *waitType = FunctionType::get(insertBuilder.getVoidTy(), {}, false);
-      // InlineAsm *waitAsync = InlineAsm::get(waitType, "cp.async.wait_group 1;", "", true);
-  
-      // insertBuilder.CreateCall(waitAsync, {});
+      insertBuilder.CreateCall(waitAsync, {});
+
+      return stage;
   }
   
 
 
-    void addAsyncTransfer(BasicBlock* bb, std::vector<std::vector<Instruction*>> &depchains, PHINode *inductor) {
+    void addAsyncTransfer(BasicBlock* bb, std::vector<std::vector<Instruction*>> &depchains, PHINode *inductor, llvm::Value *stage) {
       IRBuilder<> insertBuilder(&bb->back());
   
       Value *inductorPlus2 = insertBuilder.CreateAdd(inductor, ConstantInt::get(inductor->getType(), 2), "inductor_plus_2");
-  
+ 
+      llvm::ValueToValueMapTy VMap1;
+
       for (auto& chain : depchains) {
           for (Instruction *inst : chain) {
               Instruction *cloned = inst->clone();
   
               for (unsigned i = 0; i < cloned->getNumOperands(); ++i) {
-                  if (cloned->getOperand(i) == inductor) {
-                      cloned->setOperand(i, inductorPlus2);
-                  }
+                if (cloned->getOperand(i) == inductor) {
+                  cloned->setOperand(i, inductorPlus2);
+                }
+              }
+
+              if(auto *gep = dyn_cast<GetElementPtrInst>(cloned)){
+                auto *addr_ptr = gep->getPointerOperand();
+                // gep->print(errs());
+                auto [addr_space, symbol, space] = traceOriginalAddressSpace(addr_ptr);
+                // errs() << " " << addr_space << '\n';
+                if(addr_space == 3){
+                  cloned->setOperand(1, stage);
+                }
               }
   
               if (cloned == inductor) {
-                  for (unsigned i = 0; i < inductor->getNumOperands(); ++i) {
-                      inductor->setIncomingValue(i, inductorPlus2);
-                  }
+                for (unsigned i = 0; i < inductor->getNumOperands(); ++i) {
+                  inductor->setIncomingValue(i, inductorPlus2);
+                }
               }
-  
+
+              llvm::RemapInstruction(cloned, VMap1, RF_NoModuleLevelChanges);
               insertBuilder.Insert(cloned);
+              VMap1[inst] = cloned;
           }
       }
   
@@ -563,53 +575,62 @@ namespace {
         if(is_tiling_loop(L, load_store_pairs, first_barrier_bb, second_barrier_bb)){
           std::vector<std::vector<Instruction*>> depchains = replaceLSPairs(L, load_store_pairs);
           PHINode *ind = getInductionVariable(L);
-          auto preheader = L->getLoopPreheader();
-          
-          
+          auto *preheader = L->getLoopPreheader();
+
+          llvm::IRBuilder<> builder(preheader->getTerminator());
+          llvm::ValueToValueMapTy VMap1, VMap2;
+
+          for(int i=0;i<2;i++){
+            for(auto &chain: depchains){
+              for(Instruction *inst: chain){
+                // inst->print(errs());
+                // errs() << " " << inst->getName() << "\n";
+                Instruction *clone = inst->clone();
+                auto preheader = L->getLoopPreheader();
+
+                for(unsigned o=0;o < clone->getNumOperands(); o++){
+                  if(clone->getOperand(o) == ind){
+                    llvm::ConstantInt *const_stage = llvm::ConstantInt::get(llvm::Type::getInt32Ty(clone->getContext()), i);
+                    clone->setOperand(o, const_stage);
+                  }
+                }
+
+                if(auto *gep = dyn_cast<GetElementPtrInst>(clone)){
+                  auto *addr_ptr = gep->getPointerOperand();
+                  // gep->print(errs());
+                  auto [addr_space, symbol, space] = traceOriginalAddressSpace(addr_ptr);
+                  // errs() << " " << addr_space << '\n';
+                  if(addr_space == 3){
+                    clone->setOperand(1, llvm::ConstantInt::get(llvm::Type::getInt32Ty(inst->getContext()), i));
+                  }
+                }
+
+                if(i == 0){
+                  llvm::RemapInstruction(clone, VMap1, RF_NoModuleLevelChanges);
+                  builder.Insert(clone);
+                  VMap1[inst] = clone;
+                }else{
+                  llvm::RemapInstruction(clone, VMap2, RF_NoModuleLevelChanges);
+                  builder.Insert(clone);
+                  VMap2[inst] = clone;
+                }
+              }
+            }
+            FunctionType *commitType = FunctionType::get(builder.getVoidTy(), {}, false);
+            InlineAsm *commitAsync = InlineAsm::get(commitType, "cp.async.commit_group;", "", true);
+            builder.CreateCall(commitAsync, {});
+          }
+
           BasicBlock* mem_transfer_bb = addMemTransferCondition(second_barrier_bb, ind, getLoopLimit(L));
-          addAsyncTransfer(mem_transfer_bb, depchains, ind);
-          replaceTxBasicBlock(depchains);
+          llvm::Value *stage = replaceTxBasicBlock(depchains, ind);
+          addAsyncTransfer(mem_transfer_bb, depchains, ind, stage);
 
-
-          // for(int i=0;i<2;i++){
-          //   for(auto &chain: depchains){
-          //     for(Instruction *inst: chain){
-          //       Instruction *clone = inst->clone();
-
-          //       for(unsigned o=0;o < clone->getNumOperands(); o++){
-          //         if(clone->getOperand(o) == ind){
-          //           llvm::ConstantInt *const_stage = llvm::ConstantInt::get(llvm::Type::getInt32Ty(clone->getContext()), i);
-          //           clone->setOperand(o, const_stage);
-          //         }
-          //       }
-
-          //       if(auto *gep: dyn_cast<GetElementPtrInst>(clone)){
-          //         auto *addr_ptr = gep->getPointerOperand();
-          //         if (auto *asc = llvm::dyn_cast<llvm::AddrSpaceCastInst>(ptr)) {
-          //           addr_ptr = asc->getOperand(0); // strip the addrspacecast
-
-          //           llvm::Type *ptrTy = ptr->getType();
-          //           if (auto *ptrPtrTy = llvm::dyn_cast<llvm::PointerType>(ptrTy)) {
-          //               unsigned as = ptrPtrTy->getAddressSpace();
-          //               if (as == 3) {
-                          
-          //               }
-          //           }
-          //         }
-          //       }
-          //     }
-          //   }
-          // }
-
-
-
-
-
-
-
-
-
-
+          for (auto chain : depchains) {
+            for (auto* inst : chain) {
+              // inst->replaceAllUsesWith(UndefValue::get(inst->getType()));
+              inst->eraseFromParent();
+            }
+          }
 
             /*
             Hoisting
@@ -641,7 +662,7 @@ namespace {
               - increment store addr + stage * BLOCKSIZE^2
               - commit
             */
-              errs()
+            errs()
               << "GOOD " << load_store_pairs.size() << "\n";
         }else{
           errs() << "BAD!\n";

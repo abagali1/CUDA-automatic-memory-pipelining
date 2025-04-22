@@ -10,7 +10,7 @@ mkdir -p benchmark_results
 
 for kernel in {1..4}; do
     echo ""
-    ./a.out $kernel | tee "benchmark_results/${kernel}_output.txt"
+    ./build_cuda/sgemm $kernel | tee "benchmark_results/${kernel}_output.txt"
     sleep 2
 done
 
