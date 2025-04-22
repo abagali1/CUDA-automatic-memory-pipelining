@@ -17,7 +17,7 @@ simple_ir:
 
 gemm:
 	@mkdir -p $(CU_DIR)
-	@cd $(CU_DIR) && nvcc -o sgemm -keep -src-in-ptx -arch=sm_80 -lineinfo -g -O0 -I../src ../sgemm.cu
+	@cd $(CU_DIR) && nvcc -o sgemm -keep -src-in-ptx -arch=sm_80 -lineinfo -g -O0 ../sgemm.cu ../src/kernels.cu 
 
 gemm_ir:
 	@mkdir -p $(IR_DIR)

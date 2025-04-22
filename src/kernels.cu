@@ -1,5 +1,3 @@
-#pragma once
-
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -103,8 +101,8 @@ extern "C" __global__ void sgemm_shared_mem_block_async(int M, int N, int K, flo
 
     // allocate buffer for current block in fast shared mem
     // shared mem is shared between all threads in a block
-    __shared__ float As[BLOCKSIZE][BLOCKSIZE];
-    __shared__ float Bs[BLOCKSIZE][BLOCKSIZE];
+    __shared__ float As[BLOCKSIZE * BLOCKSIZE];
+    __shared__ float Bs[BLOCKSIZE * BLOCKSIZE];
 
 
     // the inner row & col that we're accessing in this thread
@@ -112,13 +110,14 @@ extern "C" __global__ void sgemm_shared_mem_block_async(int M, int N, int K, flo
     const uint threadRow = threadIdx.y;
 
     // advance pointers to the starting positions
-    A += cRow * BLOCKSIZE * K;                    // row=cRow, col=0
-    B += cCol * BLOCKSIZE;                        // row=0, col=cCol
+    // A += cRow * BLOCKSIZE * K;                    // row=cRow, col=0
+    // B += cCol * BLOCKSIZE;                        // row=0, col=cCol
     C += cRow * BLOCKSIZE * N + cCol * BLOCKSIZE; // row=cRow, col=cCol
 
     float tmp = 0.0;
     // group.sync();
-    for (int bkIdx = 0; bkIdx < K ; bkIdx += BLOCKSIZE) {
+    size_t num_batches = K / BLOCKSIZE;
+    for (int bkIdx = 0; bkIdx < num_batches ; bkIdx += 1) {
         // Have each thread load one of the elements in A & B
         // Make the threadCol (=threadIdx.x) the consecutive index
         // to allow global memory access coalescing
@@ -127,34 +126,57 @@ extern "C" __global__ void sgemm_shared_mem_block_async(int M, int N, int K, flo
         // Bs[threadRow * BLOCKSIZE + threadCol] = B[threadRow * N + threadCol];
         // __syncthreads();
 
-        cg::memcpy_async(
-        tile,
-        As[tile.meta_group_rank()],
-        A + (tile.meta_group_rank() * K),
-        cuda::aligned_size_t<128>(sizeof(float) * tile.size())
+        // cg::memcpy_async(
+        // tile,
+        // As[tile.meta_group_rank()],
+        // A + (tile.meta_group_rank() * K),
+        // cuda::aligned_size_t<128>(sizeof(float) * tile.size())
+        // );
+
+        // cg::memcpy_async(
+        // tile,
+        // Bs[tile.meta_group_rank()],
+        // B + (tile.meta_group_rank() * K),
+        // cuda::aligned_size_t<128>(sizeof(float) * tile.size())
+        // );
+        asm volatile(
+          "cp.async.ca.shared.global [%0], [%1], 4, 4;\n"
+          :
+          : "r"(static_cast<std::uint32_t>(__cvta_generic_to_shared(&As[threadRow * BLOCKSIZE + threadCol]))),
+            "l"(&A[(cRow * BLOCKSIZE * K) + (BLOCKSIZE * bkIdx) + threadRow * K + threadCol])
+          : "memory"
         );
 
-        cg::memcpy_async(
-        tile,
-        Bs[tile.meta_group_rank()],
-        B + (tile.meta_group_rank() * K),
-        cuda::aligned_size_t<128>(sizeof(float) * tile.size())
+        asm volatile(
+          "cp.async.ca.shared.global [%0], [%1], 4, 4;\n"
+          :
+          : "r"(static_cast<std::uint32_t>(__cvta_generic_to_shared(&Bs[threadRow * BLOCKSIZE + threadCol]))),
+            "l"(&B[(cCol * BLOCKSIZE) + (BLOCKSIZE * N * bkIdx) + threadRow * N + threadCol])
+          : "memory"
         );
 
+        asm volatile(
+          "cp.async.commit_group;\n"
+        );
+
+        asm volatile(
+          "cp.async.wait_group 0;\n"
+        );
+        __syncthreads();
         // if(cRow == 0 && cCol == 0){
         //   printf("Tx: %d Ty: %d MR: %d\n", threadIdx.x, threadIdx.y, tile.group_meta_rank());
         // }
 
-        cg::wait(group);
+        // cg::wait(group);
 
         // block threads in this block until cache is fully populated
-        A += BLOCKSIZE;
-        B += BLOCKSIZE * N;
+        // A += BLOCKSIZE;
+        // B += BLOCKSIZE * N;
 
         // execute the dotproduct on the currently cached block
         for (int dotIdx = 0; dotIdx < BLOCKSIZE; ++dotIdx) {
-            tmp += As[threadRow][dotIdx] *
-            Bs[dotIdx][threadCol];
+            tmp += As[threadRow * BLOCKSIZE + dotIdx] *
+            Bs[dotIdx * BLOCKSIZE + threadCol];
         }
         __syncthreads();
     }
