@@ -38,6 +38,7 @@
 #include <vector>
 #include <string>
 #include <utility>
+#include <set>
 #include <unordered_set>
 
 /* *******Implementation Ends Here******* */
@@ -140,7 +141,6 @@ namespace {
               GV.replaceAllUsesWith(ConstantExpr::getBitCast(NewGV, GV.getType()));
               // (Optional) Erase old GV
               GV.eraseFromParent();
-              errs() << "✅ Resized shared memory array: " << VarName << " " << new_num_elements << "\n";
               return;
           }
       }
@@ -174,7 +174,7 @@ namespace {
         return {};
       }else{
         for(auto it: buffers){
-          resizeSharedMemoryArray(it.first, it.second / 2); // Implicit conversion from size (bytes) to 2x num_elements (count). Assumes float
+          resizeSharedMemoryArray(it.first, 2048); // Implicit conversion from size (bytes) to 2x num_elements (count). Assumes float
         }
       }
 
@@ -306,15 +306,30 @@ namespace {
       return nullptr; // Not found
     }
 
-    void replaceLSPairs(llvm::Loop *L, std::unordered_map<llvm::Instruction *, llvm::Instruction *> &load_store_pairs)
+    void traceDependencies(llvm::Loop *L, llvm::Value *val, std::set<llvm::Instruction*> &seen) {
+      if (auto *inst = llvm::dyn_cast<llvm::Instruction>(val)) {
+          // Avoid revisiting
+          if(inst->comesBefore(&L->getHeader()->back()))
+            return;
+
+          if (!seen.insert(inst).second)
+              return;
+
+          // Recurse on operands
+          for (llvm::Value *op : inst->operands()) {
+              traceDependencies(L, op, seen);
+          }
+      }
+    }
+
+    std::vector<std::set<Instruction*>> replaceLSPairs(llvm::Loop *L, std::unordered_map<llvm::Instruction *, llvm::Instruction *> &load_store_pairs)
     {
       BasicBlock *Preheader = L->getLoopPreheader();
-      if (!Preheader)
-        return;
 
       // llvm::LLVMContext context;
       // IRBuilder<> insertBuilder;
       CallInst *lastInserted = nullptr;
+      std::vector<std::set<Instruction*>> depchains;
       for (auto &pair : load_store_pairs)
       {
         auto *loadInst = dyn_cast<LoadInst>(pair.first);
@@ -326,13 +341,18 @@ namespace {
         IRBuilder<> insertBuilder(storeInst);
 
         // Cast operands to expected types
-        Value *dstInt = insertBuilder.CreatePtrToInt(dstSharedAddr, insertBuilder.getInt32Ty(), "sharedAddrCase");
-        Value *srcPtr = insertBuilder.CreateBitCast(srcGlobalAddr, insertBuilder.getInt8Ty()->getPointerTo(), "globalAddrCast");
 
         // Create function type for inline asm
         std::vector<Type *> argTypes = {
             insertBuilder.getInt32Ty(),
             insertBuilder.getInt8Ty()->getPointerTo()};
+
+        FunctionType *convertType = FunctionType::get(insertBuilder.getInt64Ty(), {insertBuilder.getInt8Ty()->getPointerTo()}, false);
+        llvm::FunctionCallee cvtaFunc = loadInst->getParent()->getModule()->getOrInsertFunction("__nv_cvta_generic_to_shared_impl", convertType);
+        Value *sharedAddrInt = insertBuilder.CreateCall(cvtaFunc, {dstSharedAddr}, "shared_int");
+
+        Value *dstInt = insertBuilder.CreateTrunc(sharedAddrInt, insertBuilder.getInt32Ty(), "trunc_i64_to_i32");
+        Value *srcPtr = insertBuilder.CreateBitCast(srcGlobalAddr, insertBuilder.getInt8Ty()->getPointerTo(), "globalAddrCast");
 
         FunctionType *asmTy = FunctionType::get(insertBuilder.getVoidTy(), argTypes, false);
         InlineAsm *cpAsync = InlineAsm::get(asmTy,
@@ -352,14 +372,17 @@ namespace {
         // // Erase the original load and store
         storeInst->eraseFromParent();
         loadInst->eraseFromParent();
+
+        std::set<Instruction*> chain;
+        traceDependencies(L, inserted, chain);
+        depchains.push_back(std::move(chain));
       }
       IRBuilder<> insertBuilder(lastInserted->getNextNode());
       FunctionType *commitType = FunctionType::get(insertBuilder.getVoidTy(), {}, false);
       InlineAsm *commitAsync = InlineAsm::get(commitType, "cp.async.commit_group;", "", true);
-      InlineAsm *waitGroup = InlineAsm::get(commitType, "cp.async.wait_group 0;", "", true);
       insertBuilder.CreateCall(commitAsync, {});
-      insertBuilder.CreateCall(waitGroup, {});
 
+      return depchains;
     }
 
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
@@ -372,17 +395,74 @@ namespace {
       for(Loop *L: li){
         std::unordered_map<Instruction*, Instruction*> load_store_pairs;
         if(is_tiling_loop(L, load_store_pairs)){
-            replaceLSPairs(L, load_store_pairs);
-              // insert 2 cp.asyncs into loop preheader
-              // For every load-store pair
-              // Find load base addr
-              // Find store base addr
-              // Create cp.async wit
+          std::vector<std::set<Instruction*>> depchains = replaceLSPairs(L, load_store_pairs);
+          PHINode *ind = getInductionVariable(L);
+          auto preheader = L->getLoopPreheader();
+
+          for(int i=0;i<2;i++){
+            for(auto &chain: depchains){
+              for(Instruction *inst: chain){
+                Instruction *clone = inst->clone();
+
+                for(unsigned o=0;o < clone->getNumOperands(); o++){
+                  if(clone->getOperand(o) == ind){
+                    llvm::ConstantInt *const_stage = llvm::ConstantInt::get(llvm::Type::getInt32Ty(clone->getContext()), i);
+                    clone->setOperand(o, const_stage);
+                  }
+                }
+
+                if(auto *gep: dyn_cast<GetElementPtrInst>(clone)){
+                  auto *addr_ptr = gep->getPointerOperand();
+                  if (auto *asc = llvm::dyn_cast<llvm::AddrSpaceCastInst>(ptr)) {
+                    addr_ptr = asc->getOperand(0); // strip the addrspacecast
+
+                    llvm::Type *ptrTy = ptr->getType();
+                    if (auto *ptrPtrTy = llvm::dyn_cast<llvm::PointerType>(ptrTy)) {
+                        unsigned as = ptrPtrTy->getAddressSpace();
+                        if (as == 3) {
+                          
+                        }
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+
+
+            /*
+            Hoisting
+            - Make each load store pair => cp.async
+            - Get inductor variable register
+            - for every cp
+              - Get deps chain for load address register up until loop header
+              - Get deps chain for store address register up until loop header
+
+            Twice:
+              -for every cp
+                - Copy deps chains into preheader 
+                  - change inductor variable to i
+                  - if first time
+                    - store addr unchanged
+                  - else
+                    - store addr + BLOCKSIZE ^ 2
+              - cp.async.commit
+
+            Loop Body
+            - Add stage = inductor var % 2 
+            - Add wait_group 1
+
+            After 2nd Barrier
+            - Add block 
+              - branch if 2 + inductor var < loop limit
+              - copy deps chain into block
+              - change inductor variable usage to inductor_var + 2
+              - increment store addr + stage * BLOCKSIZE^2
+              - commit
+            */
               errs()
               << "GOOD " << load_store_pairs.size() << "\n";
-          PHINode *ind = getInductionVariable(L);
-          ind->print(errs());
-          errs() << "\n";
         }else{
           errs() << "BAD!\n";
         }
