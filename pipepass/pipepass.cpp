@@ -33,137 +33,304 @@
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 
 /* *******Implementation Starts Here******* */
+#include <math.h>
+#include <deque>
+#include <vector>
+#include <string>
+#include <utility>
 #include <unordered_set>
-#include <unordered_map>
 
 /* *******Implementation Ends Here******* */
 
 using namespace llvm;
 
+const uint64_t MAX_SHARED_MEM = 163 * 1024;
+
 namespace {
-  struct HW2CorrectnessPass : public PassInfoMixin<HW2CorrectnessPass> {
+  struct PipelinePass : public PassInfoMixin<PipelinePass> {
+    size_t tile_size = 0;
+    Module *top_level_module;
+
+    std::tuple<unsigned, std::string, uint64_t> traceOriginalAddressSpace(Value *V,  unsigned MaxDepth = 16) {
+      for (unsigned Depth = 0; Depth < MaxDepth; ++Depth) {
+          V = V->stripPointerCasts();
+          // Case 1: Global variable (e.g., shared memory tile)
+          if (auto *GV = dyn_cast<GlobalVariable>(V)) {
+              Type *Ty = GV->getValueType();
+              const DataLayout &DL = GV->getParent()->getDataLayout();
+              uint64_t Size = DL.getTypeAllocSize(Ty);
+              return { GV->getAddressSpace(), std::string(GV->getName()), Size};
+          }
+          // Case 2: Function argument
+          if (auto *Arg = dyn_cast<Argument>(V)) {
+            if (PointerType *PT = dyn_cast<PointerType>(Arg->getType())) {
+              return { PT->getAddressSpace(), "arg", 0}; // size unknown
+            }
+          }
+          // Case 3: Alloca
+          if (auto *AI = dyn_cast<AllocaInst>(V)) {
+            const DataLayout &DL = AI->getModule()->getDataLayout(); 
+            Type *Ty = AI->getAllocatedType();
+            uint64_t Size = DL.getTypeAllocSize(Ty);
+            return { AI->getType()->getAddressSpace(), "alloca", Size};
+          }
+          // Recursively trace through these:
+          if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
+              V = GEP->getPointerOperand();
+              continue;
+          }
+          if (auto *LI = dyn_cast<LoadInst>(V)) {
+              V = LI->getPointerOperand();
+              continue;
+          }
+          if (auto *PHI = dyn_cast<PHINode>(V)) {
+              if (Value *Incoming = PHI->getIncomingValue(0)) {
+                  V = Incoming;
+                  continue;
+              }
+          }
+          break; // Unknown source or not traceable further
+      }
+      return { static_cast<unsigned>(-1), "", 0}; // Unknown
+    }
+
+    bool is_barrier(Instruction &i){
+      if (auto *CI = dyn_cast<CallInst>(&i)) {
+        if (Function *F = CI->getCalledFunction()) {
+            if (F->getName() == "llvm.nvvm.barrier0") {
+              return true;
+            }
+        }
+        if (auto *IA = dyn_cast<InlineAsm>(CI->getCalledOperand())) {
+          StringRef AsmStr = IA->getAsmString();
+          if (AsmStr.contains("bar.sync")) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    void resizeSharedMemoryArray(StringRef VarName, uint64_t new_num_elements) {
+      Module &M = *this->top_level_module;
+      LLVMContext &Ctx = M.getContext();
+      const DataLayout &DL = M.getDataLayout();
+
+      for (GlobalVariable &GV : M.globals()) {
+          if (GV.getName() == VarName && GV.getAddressSpace() == 3) {
+              // Get the element type (e.g., float)
+              Type *Ty = GV.getValueType();
+              // Create a new larger array type
+              ArrayType *NewArrayTy = ArrayType::get(Ty->getArrayElementType(), new_num_elements);
+              // Clone global with new type
+              GlobalVariable *NewGV = new GlobalVariable(
+                  M,
+                  NewArrayTy,
+                  /*isConstant=*/GV.isConstant(),
+                  GlobalValue::LinkOnceODRLinkage,
+                  /*Initializer=*/UndefValue::get(NewArrayTy), // Must be null for shared mem
+                  GV.getName() + "resized",
+                  /*InsertBefore=*/nullptr,
+                  GV.getThreadLocalMode(),
+                  GV.getAddressSpace(),
+                  true
+                );
+              NewGV->copyAttributesFrom(&GV);
+              // Replace all uses (with proper bitcasts if needed)
+              GV.replaceAllUsesWith(ConstantExpr::getBitCast(NewGV, GV.getType()));
+              // (Optional) Erase old GV
+              GV.eraseFromParent();
+              errs() << "✅ Resized shared memory array: " << VarName << " " << new_num_elements << "\n";
+              return;
+          }
+      }
+    }
+
+    std::unordered_map<Instruction*, Instruction*> check_transfer_reqs(std::vector<BasicBlock*> &path){
+      size_t total_shared_usage = 0;
+      std::unordered_map<std::string, uint64_t> buffers;
+      std::unordered_map<Instruction*, Instruction*> load_store_pairs;
+
+      for(BasicBlock *b: path){
+        for(Instruction &i: *b){
+          if (auto *SI = dyn_cast<StoreInst>(&i)) {
+            auto [addr_space, symbol, size] = traceOriginalAddressSpace(SI->getPointerOperand());
+            if(addr_space == 3){
+              // find corresponding global load
+              errs() << "SZ: " << size << "\n";
+              if(auto *LI = dyn_cast<LoadInst>(SI->getValueOperand())){
+                load_store_pairs[LI] = SI;
+                if(buffers.find(symbol) == buffers.end()){
+                  buffers[symbol] = size;
+                  this->tile_size = sqrt(size);
+                  total_shared_usage += size;
+                }
+              }
+            }
+          }
+        }
+      }
+      if(total_shared_usage * 2 > MAX_SHARED_MEM || load_store_pairs.empty()){
+        return {};
+      }else{
+        for(auto it: buffers){
+          resizeSharedMemoryArray(it.first, 0); // Implicit conversion from size (bytes) to 2x num_elements (count). Assumes float
+        }
+      }
+
+      return load_store_pairs;
+    }
+
+    std::vector<BasicBlock*> loop_traverse(Loop *l, BasicBlock *start, BasicBlock *end){
+      std::deque<BasicBlock*> q;
+      std::unordered_set<BasicBlock*> visited;
+      std::vector<BasicBlock*> path;
+
+      q.push_back(start);
+      visited.insert(start);
+
+      bool reached = false;
+      while(!q.empty()){
+        BasicBlock *cur_node = q.front();
+        q.pop_front();
+
+        if(cur_node == end){
+          reached = true;
+        }
+
+        path.push_back(cur_node);
+
+        if(reached)
+          break;
+
+        for(BasicBlock *s: successors(cur_node)){
+          if(l->contains(s) && visited.insert(s).second){
+            q.push_back(s);
+          }
+        }
+      }
+      return path;
+    }
+
+    bool is_tiling_loop(Loop *l, std::unordered_map<Instruction*, Instruction*> &final_pairs){
+      if(l->getParentLoop() != nullptr){
+        return false;
+      }
+      auto blocks = l->blocks();
+      auto header = l->getHeader();
+
+      std::deque<BasicBlock*> q;
+      std::unordered_set<BasicBlock*> visited;
+
+      Instruction *first_barrier = nullptr;
+      Instruction *second_barrier = nullptr;
+
+      q.push_back(header);
+      visited.insert(header);
+
+      while(!q.empty()){
+        BasicBlock *cur_node = q.front();
+        q.pop_front();
+
+        Instruction &term = cur_node->back();
+        for(unsigned i=0;i<term.getNumSuccessors();i++){
+          BasicBlock *s = term.getSuccessor(i);
+          if(visited.find(s) == visited.end()){
+            q.push_back(s);
+            visited.insert(s);
+          }
+        }
+
+        for(Instruction &i: *cur_node){
+          if(is_barrier(i)){
+            if(first_barrier == nullptr){
+              first_barrier = &i;
+            }else if(second_barrier == nullptr){
+              second_barrier = &i;
+            }else{
+              errs() << "UNKOWN BAR\n";
+              return false; // unknown barrier usage
+            }
+          }
+        }
+      }
+      if(first_barrier == nullptr || second_barrier == nullptr){
+        errs() << "NO BAR\n";
+        return false;
+      }
+
+      std::vector<BasicBlock*> barrier_traversal = loop_traverse(l, header, first_barrier->getParent());
+
+      // verify global->shared pattern and return instruction pairs
+      auto load_store_pairs = check_transfer_reqs(barrier_traversal);
+      if(load_store_pairs.empty()){
+        barrier_traversal = loop_traverse(l, first_barrier->getParent(), header);
+        load_store_pairs = check_transfer_reqs(barrier_traversal);
+
+        if(load_store_pairs.empty()){
+          errs() << "NO TRANSFER\n";
+          return false;
+        }
+      }
+
+      final_pairs = load_store_pairs;
+      return true;
+    }
+
+    PHINode *getInductionVariable(llvm::Loop *L) {
+      BasicBlock *Header = L->getHeader();
+      for (Instruction &I : *Header) {
+          if (PHINode *PN = dyn_cast<PHINode>(&I)) {
+              // Must have two incoming values: from preheader and latch
+              if (PN->getNumIncomingValues() != 2)
+                  continue;
+
+              BasicBlock *Preheader = L->getLoopPreheader();
+              BasicBlock *Latch     = L->getLoopLatch();
+
+              if (!Preheader || !Latch)
+                  continue;
+
+              Value *Init = PN->getIncomingValueForBlock(Preheader);
+              Value *Step = PN->getIncomingValueForBlock(Latch);
+
+              // Optionally: check if step is `add i32 %phi, 1`
+              if (BinaryOperator *BO = dyn_cast<BinaryOperator>(Step)) {
+                  if (BO->getOpcode() == Instruction::Add &&
+                      BO->getOperand(0) == PN || BO->getOperand(1) == PN) {
+                      return PN;
+                  }
+              }
+          }
+      }
+      return nullptr; // Not found
+    }
 
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
       llvm::BlockFrequencyAnalysis::Result &bfi = FAM.getResult<BlockFrequencyAnalysis>(F);
       llvm::BranchProbabilityAnalysis::Result &bpi = FAM.getResult<BranchProbabilityAnalysis>(F);
       llvm::LoopAnalysis::Result &li = FAM.getResult<LoopAnalysis>(F);
       /* *******Implementation Starts Here******* */
-      // Your core logic should reside here.
-
+      errs() << "Passing function: " << F.getName() << "\n";
+      this->top_level_module = F.getParent();
       for(Loop *L: li){
-        auto blocks = L->getBlocks();
-        std::unordered_set<BasicBlock*> freq_path;
-        std::unordered_set<BasicBlock*> infreq_path(blocks.begin(), blocks.end());
-
-        BasicBlock *header = L->getHeader();
-        BasicBlock *cur_block = header;
-
-        freq_path.insert(header);
-        infreq_path.erase(header);
-        do{
-          Instruction &term = cur_block->back();
-
-          if(term.getNumSuccessors() > 1){
-            BasicBlock *left = term.getSuccessor(0);
-            BasicBlock *right = term.getSuccessor(1);
-            auto p = bpi.getEdgeProbability(cur_block, left);
-
-            if(p >= BranchProbability(4, 5)){ // left frequent
-              cur_block = left;
-              freq_path.insert(left);
-              infreq_path.erase(left);
-            }else if(p <= BranchProbability(1, 5)){ // right frequent
-              cur_block = right;
-              freq_path.insert(right);
-              infreq_path.erase(right);
-            }else{ // neither frequent
-              break;
-            }
-          }else{
-            freq_path.insert(cur_block);
-            infreq_path.erase(cur_block);
-            cur_block = cur_block->getUniqueSuccessor();
-          }
-        }while(cur_block != header);
-
-        std::unordered_set<Instruction*> freq_load, freq_store, infreq_store;
-        for(BasicBlock *b: freq_path){
-          for(Instruction &i: *b){
-            auto opcode = i.getOpcode();
-            if(opcode == Instruction::Load){
-              freq_load.insert(&i);
-            }else if(opcode == Instruction::Store){
-              freq_store.insert(&i);
-            }
-          }
-        }
-        for(BasicBlock *b: infreq_path){
-          for(Instruction &i: *b){
-            auto opcode = i.getOpcode();
-            if(opcode == Instruction::Store){
-              infreq_store.insert(&i);
-            }
-          }
-        }
-
-        for(Instruction *freq_load_inst: freq_load){
-          auto load_addr = freq_load_inst->getOperand(0);
-          if(!L->isLoopInvariant(load_addr)){
-            continue;
-          }
-
-          bool invariant = true;
-          for(Instruction *freq_store_inst: freq_store){
-            auto store_addr = freq_store_inst->getOperand(1);
-            if(store_addr == load_addr){
-              invariant = false;
-              break;
-            }
-          }
-          if(!invariant){
-            continue;
-          }
-
-          freq_load_inst->moveBefore(&L->getLoopPreheader()->back());
-
-          SSAUpdater ssa_updater;
-          ssa_updater.Initialize(freq_load_inst->getType(), freq_load_inst->getName());
-          ssa_updater.AddAvailableValue(freq_load_inst->getParent(), freq_load_inst);
-
-          for(Instruction *infreq_store_inst: infreq_store){
-            auto store_addr = infreq_store_inst->getOperand(1);
-            if(store_addr == load_addr){
-              Instruction *load_fix_up = freq_load_inst->clone();
-              load_fix_up->insertAfter(infreq_store_inst);
-              ssa_updater.AddAvailableValue(infreq_store_inst->getParent(), load_fix_up);
-            }
-          }
-
-          std::unordered_set<Use*> use_set;
-          for(Use &use: freq_load_inst->uses()){
-            use_set.insert(&use);
-          }
-          for(Use *use: use_set){
-            ssa_updater.RewriteUse(*use);
-          }
+        std::unordered_map<Instruction*, Instruction*> load_store_pairs;
+        if(is_tiling_loop(L, load_store_pairs)){
+          // insert 2 cp.asyncs into loop preheader
+            // For every load-store pair
+              // Find load base addr
+              // Find store base addr
+              // Create cp.async wit
+          errs() << "GOOD " << load_store_pairs.size() << "\n";
+          PHINode *ind = getInductionVariable(L);
+          ind->print(errs());
+          errs() << "\n";
+        }else{
+          errs() << "BAD!\n";
         }
       }
 
       /* *******Implementation Ends Here******* */
-      // Your pass is modifying the source code. Figure out which analyses
-      // are preserved and only return those, not all.
-      return PreservedAnalyses::all();
-    }
-  };
-  struct HW2PerformancePass : public PassInfoMixin<HW2PerformancePass> {
-    PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
-      llvm::BlockFrequencyAnalysis::Result &bfi = FAM.getResult<BlockFrequencyAnalysis>(F);
-      llvm::BranchProbabilityAnalysis::Result &bpi = FAM.getResult<BranchProbabilityAnalysis>(F);
-      llvm::LoopAnalysis::Result &li = FAM.getResult<LoopAnalysis>(F);
-      /* *******Implementation Starts Here******* */
-      // This is a bonus. You do not need to attempt this to receive full credit.
-      /* *******Implementation Ends Here******* */
-
       // Your pass is modifying the source code. Figure out which analyses
       // are preserved and only return those, not all.
       return PreservedAnalyses::all();
@@ -179,7 +346,7 @@ extern "C" ::llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WEAK llvmGetPassPluginIn
         [](StringRef Name, FunctionPassManager &FPM,
         ArrayRef<PassBuilder::PipelineElement>) {
           if(Name == "pipe"){
-            FPM.addPass(HW2CorrectnessPass());
+            FPM.addPass(PipelinePass());
             return true;
           }
           return false;
