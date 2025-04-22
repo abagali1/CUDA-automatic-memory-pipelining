@@ -306,6 +306,62 @@ namespace {
       return nullptr; // Not found
     }
 
+    void replaceLSPairs(llvm::Loop *L, std::unordered_map<llvm::Instruction *, llvm::Instruction *> &load_store_pairs)
+    {
+      BasicBlock *Preheader = L->getLoopPreheader();
+      if (!Preheader)
+        return;
+
+      // llvm::LLVMContext context;
+      // IRBuilder<> insertBuilder;
+      CallInst *lastInserted = nullptr;
+      for (auto &pair : load_store_pairs)
+      {
+        auto *loadInst = dyn_cast<LoadInst>(pair.first);
+        auto *storeInst = dyn_cast<StoreInst>(pair.second);
+
+        Value *srcGlobalAddr = loadInst->getPointerOperand();
+        Value *dstSharedAddr = storeInst->getPointerOperand();
+
+        IRBuilder<> insertBuilder(storeInst);
+
+        // Cast operands to expected types
+        Value *dstInt = insertBuilder.CreatePtrToInt(dstSharedAddr, insertBuilder.getInt32Ty(), "sharedAddrCase");
+        Value *srcPtr = insertBuilder.CreateBitCast(srcGlobalAddr, insertBuilder.getInt8Ty()->getPointerTo(), "globalAddrCast");
+
+        // Create function type for inline asm
+        std::vector<Type *> argTypes = {
+            insertBuilder.getInt32Ty(),
+            insertBuilder.getInt8Ty()->getPointerTo()};
+
+        FunctionType *asmTy = FunctionType::get(insertBuilder.getVoidTy(), argTypes, false);
+        InlineAsm *cpAsync = InlineAsm::get(asmTy,
+                                            "cp.async.ca.shared.global [$0], [$1], 4, 4;",
+                                            "r,l",
+                                            true // hasSideEffects
+        );
+
+        // // Insert inline asm into loop where load originally was
+        // errs() << "BEFORE CREATE CALL\n";
+        CallInst *inserted = insertBuilder.CreateCall(cpAsync, {dstInt, srcPtr});
+
+        if(lastInserted == nullptr || lastInserted->comesBefore(inserted)){
+          lastInserted = inserted;
+        }
+        // errs() << "AFTER CREATE CALL\n";
+        // // Erase the original load and store
+        storeInst->eraseFromParent();
+        loadInst->eraseFromParent();
+      }
+      IRBuilder<> insertBuilder(lastInserted->getNextNode());
+      FunctionType *commitType = FunctionType::get(insertBuilder.getVoidTy(), {}, false);
+      InlineAsm *commitAsync = InlineAsm::get(commitType, "cp.async.commit_group;", "", true);
+      InlineAsm *waitGroup = InlineAsm::get(commitType, "cp.async.wait_group 0;", "", true);
+      insertBuilder.CreateCall(commitAsync, {});
+      insertBuilder.CreateCall(waitGroup, {});
+
+    }
+
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
       llvm::BlockFrequencyAnalysis::Result &bfi = FAM.getResult<BlockFrequencyAnalysis>(F);
       llvm::BranchProbabilityAnalysis::Result &bpi = FAM.getResult<BranchProbabilityAnalysis>(F);
@@ -316,12 +372,14 @@ namespace {
       for(Loop *L: li){
         std::unordered_map<Instruction*, Instruction*> load_store_pairs;
         if(is_tiling_loop(L, load_store_pairs)){
-          // insert 2 cp.asyncs into loop preheader
-            // For every load-store pair
+            replaceLSPairs(L, load_store_pairs);
+              // insert 2 cp.asyncs into loop preheader
+              // For every load-store pair
               // Find load base addr
               // Find store base addr
               // Create cp.async wit
-          errs() << "GOOD " << load_store_pairs.size() << "\n";
+              errs()
+              << "GOOD " << load_store_pairs.size() << "\n";
           PHINode *ind = getInductionVariable(L);
           ind->print(errs());
           errs() << "\n";
