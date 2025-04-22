@@ -14,7 +14,6 @@ simple:
 
 simple_ir:
 	@mkdir -p $(IR_DIR)
-	cd $(IR_DIR) && clang++ --cuda-gpu-arch=sm_80 --cuda-device-only -emit-llvm -S ../simplest_kernel.cu -o simplest_kernel_dev.ll -Xclang -disable-O0-optnone -Xclang -fcuda-allow-variadic-functions -D_LIBCUDACXX_HAS_CUDA_ATOMIC_IMPL -g
 
 gemm:
 	@mkdir -p $(CU_DIR)
@@ -22,8 +21,8 @@ gemm:
 
 gemm_ir:
 	@mkdir -p $(IR_DIR)
-	@cd $(IR_DIR) && clang++ --cuda-gpu-arch=sm_80 --cuda-path=/sw/pkgs/arc/cuda/11.8.0 --cuda-device-only -emit-llvm -c ../sgemm.cu ../src/kernels.cu -Xclang -disable-O0-optnone -Xclang -fcuda-allow-variadic-functions -D_LIBCUDACXX_HAS_CUDA_ATOMIC_IMPL -g
-	@cd $(IR_DIR) && clang++ --cuda-gpu-arch=sm_80 --cuda-path=/sw/pkgs/arc/cuda/11.8.0 --cuda-host-only  ../sgemm.cu ../src/kernels.cu -lcudart -L/sw/pkgs/arc/cuda/11.8.0/lib64
+	@cd $(IR_DIR) && clang++ --cuda-gpu-arch=sm_80 --cuda-path=/sw/pkgs/arc/cuda/11.8.0 --cuda-device-only -emit-llvm -c ../src/kernels.cu -o sgemm_device_pre.o -Xclang -disable-O0-optnone -Xclang -fcuda-allow-variadic-functions -D_LIBCUDACXX_HAS_CUDA_ATOMIC_IMPL
+	@cd $(IR_DIR) && clang++ --cuda-gpu-arch=sm_80 --cuda-path=/sw/pkgs/arc/cuda/11.8.0 --cuda-host-only -c ../sgemm.cu -o sgemm_host.o -lcudart -L/sw/pkgs/arc/cuda/11.8.0/lib64
 	@cd $(IR_DIR) && opt -S -passes='loop-simplify,mem2reg' sgemm_device_pre.o -o sgemm_device_post.o
 	# clang++ --cuda-gpu-arch=sm_80 --cuda-path=/sw/pkgs/arc/cuda/11.8.0 sgemm.cu src/kernels.cu -lcudart -L/sw/pkgs/arc/cuda/11.8.0/lib64 -Xclang -disable-O0-optnone -Xclang -fcuda-allow-variadic-functions -D_LIBCUDACXX_HAS_CUDA_ATOMIC_IMPL -g
 
@@ -42,9 +41,8 @@ pass:
 apply_pass: pass gemm_ir
 	@opt -S -load-pass-plugin $(PASS_DIR)/pipepass/PipePass.so -passes="pipe" $(IR_DIR)/sgemm_device_post.o -o $(IR_DIR)/sgemm_device_pipelined.o
 	@cd $(IR_DIR) && llc -march=nvptx64 -mcpu=sm_80 sgemm_device_pipelined.o -o sgemm_device.ptx
-	# @cd $(IR_DIR) && nvcc -arch=sm_80 --cubin sgemm_device.ptx
-	# @cd $(IR_DIR) && nvcc -arch=sm_80 sgemm_device.cubin -o sgemm.o --device-link
-	# @cd $(IR_DIR) && nvcc -arch=sm_80 -I../src/ ../sgemm.cu sgemm.o -o sgemm_opt --ptxas-options=-v
+	@cd $(IR_DIR) && mkdir -p tmp
+	@cd $(IR_DIR) && ../steps.sh
 
 clean:
 	@rm -rf $(CU_DIR)

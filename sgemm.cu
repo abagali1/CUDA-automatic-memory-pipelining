@@ -107,11 +107,11 @@ int div_ceil(int numerator, int denominator) {
   return res.rem ? (res.quot + 1) : res.quot;
 }
 
-__global__ void sgemm_naive(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C);
-__global__ void sgemm_global_mem_coalesce(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C);
-__global__ void sgemm_shared_mem_block(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C);
-__global__ void sgemm_shared_mem_block_async(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C);
-__global__ void sgemm_shared_mem_block_async_overlap(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C);
+extern "C" __global__ void sgemm_naive(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C);
+extern "C" __global__ void sgemm_global_mem_coalesce(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C);
+extern "C" __global__ void sgemm_shared_mem_block(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C);
+extern "C" __global__ void sgemm_shared_mem_block_async(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C);
+extern "C" __global__ void sgemm_shared_mem_block_async_overlap(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C);
 
 
 void run_sgemm_naive(int M, int N, int K, float alpha, float *A, float *B, float beta, float *C) {

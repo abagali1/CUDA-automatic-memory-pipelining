@@ -15,7 +15,7 @@
 
 namespace cg = cooperative_groups;
 
-__global__ void sgemm_naive(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C) {
+extern "C" __global__ void sgemm_naive(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C) {
     const uint y = blockIdx.x * blockDim.x + threadIdx.x;
     const uint x = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -31,7 +31,7 @@ __global__ void sgemm_naive(int M, int N, int K, float alpha, const float *A, co
 }
 
 
-__global__ void sgemm_global_mem_coalesce(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C) {
+extern "C" __global__ void sgemm_global_mem_coalesce(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C) {
     // const int cRow = blockIdx.x * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
     // const int cCol = blockIdx.y * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
     const int cRow = blockIdx.y * BLOCKSIZE + threadIdx.y;
@@ -47,7 +47,7 @@ __global__ void sgemm_global_mem_coalesce(int M, int N, int K, float alpha, cons
     }
 }
 
-__global__ void sgemm_shared_mem_block(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C) {
+extern "C" __global__ void sgemm_shared_mem_block(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C) {
     // the output block that we want to compute in this threadblock
     const uint cRow = blockIdx.x;
     const uint cCol = blockIdx.y;
@@ -93,7 +93,7 @@ __global__ void sgemm_shared_mem_block(int M, int N, int K, float alpha, const f
     C[threadRow * N + threadCol] = tmp;
 }
 
-__global__ void sgemm_shared_mem_block_async(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C) {
+extern "C" __global__ void sgemm_shared_mem_block_async(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C) {
     // the output block that we want to compute in this threadblock
     const uint cRow = blockIdx.y;
     const uint cCol = blockIdx.x;
@@ -171,7 +171,7 @@ __device__ __forceinline__ float compute(const float As[BLOCKSIZE][BLOCKSIZE], c
     return tmp;
 }
   
-__global__ void sgemm_shared_mem_block_async_overlap(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C) {
+extern "C" __global__ void sgemm_shared_mem_block_async_overlap(int M, int N, int K, float alpha, const float *A, const float *B, float beta, float *C) {
     // the output block that we want to compute in this threadblock
     const uint cRow = blockIdx.y;
     const uint cCol = blockIdx.x;

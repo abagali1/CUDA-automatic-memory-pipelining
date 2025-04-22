@@ -14,8 +14,7 @@ module load cuda/11.8
 # ./gen_benchmark_results.sh
 # ncu --set full -o profiling_data/smem_async -f ./build_cuda/sgemm 4
 # ./build/simplest_kernel
-# ./build_ir/sgemm_opt 2
-./a.out 2
+compute-sanitizer ./build_ir/sgemm_opt.out 2
 
 end_time=$(date +%s)
 runtime=$((end_time - start_time))
