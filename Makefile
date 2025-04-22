@@ -26,13 +26,13 @@ gemm_ir:
 	@cd $(IR_DIR) && opt -S -passes='loop-simplify,mem2reg' sgemm_device_pre.o -o sgemm_device_post.o
 	# clang++ --cuda-gpu-arch=sm_80 --cuda-path=/sw/pkgs/arc/cuda/11.8.0 sgemm.cu src/kernels.cu -lcudart -L/sw/pkgs/arc/cuda/11.8.0/lib64 -Xclang -disable-O0-optnone -Xclang -fcuda-allow-variadic-functions -D_LIBCUDACXX_HAS_CUDA_ATOMIC_IMPL -g
 
-viz: gemm_ir
-	@cd $(IR_DIR) && llvm-extract -func=_Z22sgemm_shared_mem_blockILi32EEviiifPKfS1_fPf sgemm_device_post.o -o sync.ll
+viz: apply_pass
+	@cd $(IR_DIR) && llvm-extract -func=sgemm_shared_mem_block sgemm_device_pipelined.o -o sync.ll
 	@cd $(IR_DIR) && opt -passes="dot-cfg" -disable-output sync.ll
-	@cd $(IR_DIR) && cat ._Z22sgemm_shared_mem_blockILi32EEviiifPKfS1_fPf.dot  | dot -Tpdf > sync.pdf
-	@cd $(IR_DIR) && llvm-extract -func=_Z36sgemm_shared_mem_block_async_overlapILi32EEviiifPKfS1_fPf sgemm_device_post.o -o async.ll
+	@cd $(IR_DIR) && cat .sgemm_shared_mem_block.dot  | dot -Tpdf > sync.pdf
+	@cd $(IR_DIR) && llvm-extract -func=sgemm_shared_mem_block_async_overlap sgemm_device_pipelined.o -o async.ll
 	@cd $(IR_DIR) && opt -passes="dot-cfg" -disable-output async.ll
-	@cd $(IR_DIR) && cat ._Z36sgemm_shared_mem_block_async_overlapILi32EEviiifPKfS1_fPf.dot  | dot -Tpdf > async.pdf
+	@cd $(IR_DIR) && cat .sgemm_shared_mem_block_async_overlap.dot  | dot -Tpdf > async.pdf
 
 pass:
 	@mkdir -p $(PASS_DIR)
