@@ -174,7 +174,7 @@ namespace {
         return {};
       }else{
         for(auto it: buffers){
-          resizeSharedMemoryArray(it.first, 0); // Implicit conversion from size (bytes) to 2x num_elements (count). Assumes float
+          resizeSharedMemoryArray(it.first, it.second / 2); // Implicit conversion from size (bytes) to 2x num_elements (count). Assumes float
         }
       }
 
