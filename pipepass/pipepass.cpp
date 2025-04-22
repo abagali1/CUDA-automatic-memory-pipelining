@@ -39,6 +39,7 @@
 #include <string>
 #include <utility>
 #include <set>
+#include <map>
 #include <unordered_set>
 
 /* *******Implementation Ends Here******* */
@@ -51,6 +52,7 @@ namespace {
   struct PipelinePass : public PassInfoMixin<PipelinePass> {
     size_t tile_size = 0;
     Module *top_level_module;
+    llvm::DominatorTree *DT;
 
     std::tuple<unsigned, std::string, uint64_t> traceOriginalAddressSpace(Value *V,  unsigned MaxDepth = 16) {
       for (unsigned Depth = 0; Depth < MaxDepth; ++Depth) {
@@ -146,10 +148,10 @@ namespace {
       }
     }
 
-    std::unordered_map<Instruction*, Instruction*> check_transfer_reqs(std::vector<BasicBlock*> &path){
+    std::map<Instruction*, Instruction*> check_transfer_reqs(std::vector<BasicBlock*> &path){
       size_t total_shared_usage = 0;
       std::unordered_map<std::string, uint64_t> buffers;
-      std::unordered_map<Instruction*, Instruction*> load_store_pairs;
+      std::map<Instruction*, Instruction*> load_store_pairs;
 
       for(BasicBlock *b: path){
         for(Instruction &i: *b){
@@ -212,7 +214,7 @@ namespace {
       return path;
     }
 
-    bool is_tiling_loop(Loop *l, std::unordered_map<Instruction*, Instruction*> &final_pairs){
+    bool is_tiling_loop(Loop *l, std::map<Instruction*, Instruction*> &final_pairs){
       if(l->getParentLoop() != nullptr){
         return false;
       }
@@ -306,30 +308,33 @@ namespace {
       return nullptr; // Not found
     }
 
-    void traceDependencies(llvm::Loop *L, llvm::Value *val, std::set<llvm::Instruction*> &seen) {
+    void traceDependencies(llvm::Loop *L, llvm::Value *val, std::vector<Instruction*> &chain, std::set<llvm::Instruction*> &seen) {
       if (auto *inst = llvm::dyn_cast<llvm::Instruction>(val)) {
           // Avoid revisiting
-          if(inst->comesBefore(&L->getHeader()->back()))
+          bool inOrBeforeLoopHeader = inst->getParent() == L->getHeader() || DT->dominates(inst, &*L->getHeader()->begin());
+          if(inst->comesBefore(&L->getHeader()->back()) || inOrBeforeLoopHeader)
             return;
 
           if (!seen.insert(inst).second)
               return;
 
+          chain.push_back(inst);
+
           // Recurse on operands
           for (llvm::Value *op : inst->operands()) {
-              traceDependencies(L, op, seen);
+              traceDependencies(L, op, chain, seen);
           }
       }
     }
 
-    std::vector<std::set<Instruction*>> replaceLSPairs(llvm::Loop *L, std::unordered_map<llvm::Instruction *, llvm::Instruction *> &load_store_pairs)
+    std::vector<std::vector<Instruction*>> replaceLSPairs(llvm::Loop *L, std::map<llvm::Instruction *, llvm::Instruction *> &load_store_pairs)
     {
       BasicBlock *Preheader = L->getLoopPreheader();
 
       // llvm::LLVMContext context;
       // IRBuilder<> insertBuilder;
       CallInst *lastInserted = nullptr;
-      std::vector<std::set<Instruction*>> depchains;
+      std::vector<std::vector<Instruction*>> depchains;
       for (auto &pair : load_store_pairs)
       {
         auto *loadInst = dyn_cast<LoadInst>(pair.first);
@@ -373,14 +378,18 @@ namespace {
         storeInst->eraseFromParent();
         loadInst->eraseFromParent();
 
-        std::set<Instruction*> chain;
-        traceDependencies(L, inserted, chain);
+        std::set<Instruction*> visited;
+        std::vector<Instruction*> chain;
+        traceDependencies(L, inserted, chain, visited);
+        std::sort(chain.begin(), chain.end(), [](Instruction* a, Instruction *b){
+          return a->comesBefore(b);
+        });
         depchains.push_back(std::move(chain));
       }
-      IRBuilder<> insertBuilder(lastInserted->getNextNode());
-      FunctionType *commitType = FunctionType::get(insertBuilder.getVoidTy(), {}, false);
-      InlineAsm *commitAsync = InlineAsm::get(commitType, "cp.async.commit_group;", "", true);
-      insertBuilder.CreateCall(commitAsync, {});
+      // IRBuilder<> insertBuilder(lastInserted->getNextNode());
+      // FunctionType *commitType = FunctionType::get(insertBuilder.getVoidTy(), {}, false);
+      // InlineAsm *commitAsync = InlineAsm::get(commitType, "cp.async.commit_group;", "", true);
+      // insertBuilder.CreateCall(commitAsync, {});
 
       return depchains;
     }
@@ -390,18 +399,23 @@ namespace {
       llvm::BranchProbabilityAnalysis::Result &bpi = FAM.getResult<BranchProbabilityAnalysis>(F);
       llvm::LoopAnalysis::Result &li = FAM.getResult<LoopAnalysis>(F);
       /* *******Implementation Starts Here******* */
+
+      DT =  &FAM.getResult<llvm::DominatorTreeAnalysis>(F);
       errs() << "Passing function: " << F.getName() << "\n";
       this->top_level_module = F.getParent();
       for(Loop *L: li){
-        std::unordered_map<Instruction*, Instruction*> load_store_pairs;
+        std::map<Instruction*, Instruction*> load_store_pairs;
         if(is_tiling_loop(L, load_store_pairs)){
-          std::vector<std::set<Instruction*>> depchains = replaceLSPairs(L, load_store_pairs);
+          std::vector<std::vector<Instruction*>> depchains = replaceLSPairs(L, load_store_pairs);
           PHINode *ind = getInductionVariable(L);
-          auto preheader = L->getLoopPreheader();
+          auto *preheader = L->getLoopPreheader();
 
-          for(int i=0;i<2;i++){
+          llvm::IRBuilder<> builder(preheader->getTerminator());
+          for(int i=0;i<1;i++){
             for(auto &chain: depchains){
               for(Instruction *inst: chain){
+                inst->print(errs());
+                errs() << " " << inst->getName() << "\n";
                 Instruction *clone = inst->clone();
 
                 for(unsigned o=0;o < clone->getNumOperands(); o++){
@@ -411,20 +425,39 @@ namespace {
                   }
                 }
 
-                if(auto *gep: dyn_cast<GetElementPtrInst>(clone)){
-                  auto *addr_ptr = gep->getPointerOperand();
-                  if (auto *asc = llvm::dyn_cast<llvm::AddrSpaceCastInst>(ptr)) {
-                    addr_ptr = asc->getOperand(0); // strip the addrspacecast
+                // if(auto *gep = dyn_cast<GetElementPtrInst>(clone)){
+                //   auto *addr_ptr = gep->getPointerOperand();
+                //   if (auto *asc = llvm::dyn_cast<llvm::AddrSpaceCastInst>(addr_ptr)) {
+                //     addr_ptr = asc->getOperand(0); // strip the addrspacecast
 
-                    llvm::Type *ptrTy = ptr->getType();
-                    if (auto *ptrPtrTy = llvm::dyn_cast<llvm::PointerType>(ptrTy)) {
-                        unsigned as = ptrPtrTy->getAddressSpace();
-                        if (as == 3) {
-                          
-                        }
-                    }
-                  }
-                }
+                //     llvm::Type *ptrTy = addr_ptr->getType();
+                //     if (auto *ptrPtrTy = llvm::dyn_cast<llvm::PointerType>(ptrTy)) {
+                //       unsigned as = ptrPtrTy->getAddressSpace();
+                //       if (as == 3) {
+                //         std::vector<llvm::Value*> indices(gep->idx_begin(), gep->idx_end());
+
+                //         // Assume flat GEP like: getelementptr float, ptr base, i64 idx
+                //         // Modify the first index (only if GEP is into flat pointer like float*)
+                //         if (!indices.empty()) {
+                //             llvm::Value *originalIndex = indices[0];
+                //             llvm::Constant *offset = llvm::ConstantInt::get(originalIndex->getType(), this->tile_size * this->tile_size * (i % 2));
+                //             llvm::Value *newIndex = llvm::BinaryOperator::CreateAdd(originalIndex, offset, "shifted_idx");
+
+                //             indices[0] = newIndex;
+                //         }
+                //         clone = llvm::GetElementPtrInst::Create(
+                //           gep->getSourceElementType(),
+                //           gep->getPointerOperand(),
+                //           indices
+                //         );
+                //       }
+                //     }
+                //   }
+                // }
+
+                builder.Insert(clone);
+                inst->replaceAllUsesWith(clone);
+                inst->eraseFromParent();
               }
             }
           }
